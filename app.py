@@ -28,8 +28,8 @@ try:
     for m in models:
         print(f"- {m.name} ({m.supported_generation_methods})", flush=True)
             
-    # Use flash-latest for broader compatibility
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    # Use gemini-2.5-flash for broader compatibility
+    model = genai.GenerativeModel('gemini-2.5-flash')
     print(f"Gemini model '{model.model_name}' initialized successfully", flush=True)
 except Exception as e:
     print(f"Error initializing Gemini model: {e}", flush=True)
@@ -237,24 +237,26 @@ def upload_file():
         try:
             img = Image.open(file_path)
             prompt = """
-            Analyze this receipt. Extract the main items and their quantities. 
-            For each item, estimate the carbon footprint in kg CO2e.
-            Return ONLY a JSON list of objects with the following keys:
-            "item_name" (string), "kg_co2e" (float), "category" (string: 'Food', 'Transport', 'Shopping', or 'Energy').
-            If multiple items, group them or pick the most significant one if too many.
-            Example: [{"item_name": "Beef Steak", "kg_co2e": 12.5, "category": "Food"}]
+            Analyze this receipt carefully line by line. Extract the main items and their quantities.
+            For each identified item, perform a realistic estimation of its carbon footprint in kg CO2e based on widely accepted Life Cycle Assessment (LCA) averages (e.g., beef ~27kg CO2e/kg, chicken ~6kg CO2e/kg, local vegetables ~0.5kg CO2e/kg, common household goods ~2-5kg CO2e per item).
+            Return a JSON list of objects representing these items exactly matching the following schema.
+            Keys to include:
+            "item_name" (string), "kg_co2e" (float - calculate accurately based on quantity and type), "category" (string: 'Food', 'Transport', 'Shopping', or 'Energy').
+            Example: [{"item_name": "Beef Steak 1lb", "kg_co2e": 12.5, "category": "Food"}]
             """
-            response = model.generate_content([prompt, img])
+            response = model.generate_content(
+                [prompt, img],
+                generation_config={"response_mime_type": "application/json"}
+            )
             import json
-            import re
             
-            # Extract JSON from response text (handle markdown code blocks)
-            json_match = re.search(r'\[.*\]', response.text, re.DOTALL)
-            if json_match:
-                analysis_results = json.loads(json_match.group())
-            else:
-                # Fallback if no JSON array found
-                analysis_results = [{"item_name": "Receipt Analysis", "kg_co2e": 2.5, "category": "Shopping"}]
+            try:
+                analysis_results = json.loads(response.text)
+                if not isinstance(analysis_results, list):
+                    analysis_results = [analysis_results]
+            except json.JSONDecodeError as e:
+                print(f"Failed to decode JSON: {e}\nRaw response: {response.text}")
+                analysis_results = [{"item_name": "Receipt Analysis Fallback", "kg_co2e": 2.5, "category": "Shopping"}]
             
             user = User.query.filter_by(auth0_id=user_info['sub']).one()
             

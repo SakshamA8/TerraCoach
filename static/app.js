@@ -55,7 +55,7 @@ function initUpload() {
             const result = await response.json();
             
             if (result.status === 'success') {
-                simulateAI(result.filename);
+                displayAIResults(result.filename, result.data);
             } else {
                 alert("Upload failed: " + result.error);
             }
@@ -66,34 +66,58 @@ function initUpload() {
     };
 }
 
-// Mock AI Interaction
-function simulateAI(filename) {
+// Dynamic AI Rendering
+function displayAIResults(filename, data) {
     const feedback = document.getElementById('ai-feedback');
     
-    setTimeout(() => {
-        feedback.innerHTML = `
-            <div class="card" style="border-left: 4px solid var(--primary-dark); animation: slideIn 0.3s ease-out;">
-                <div style="display: flex; gap: 1rem;">
-                    <div class="ai-icon">
-                        <i data-lucide="check-circle"></i>
-                    </div>
-                    <div>
-                        <p class="text-sm font-bold">Receipt Parsed Successfully</p>
-                        <p class="text-xs text-muted mb-2">Source: ${filename}</p>
-                        <p class="text-sm mt-1">I've identified sustainable swaps from your grocery list:</p>
-                        <ul style="font-size: 0.875rem; color: var(--text-muted); margin-top: 0.8rem; list-style: none; display: flex; flex-direction: column; gap: 0.5rem;">
-                            <li>🥛 <span class="font-bold">Almond Milk</span> (Swap for Dairy) → <span style="color: var(--primary-dark);">Saved 0.8kg</span></li>
-                            <li>🥩 <span class="font-bold">Beef Ribeye</span> (High impact) → <span style="color: var(--accent);">+4.5kg</span></li>
-                        </ul>
-                        <div class="mt-4">
-                            <button class="btn btn-primary btn-sm" onclick="window.location.reload()">Add to My Footprint</button>
-                        </div>
+    // Construct the items list dynamically
+    let itemsHtml = '';
+    if (data && data.length > 0) {
+        data.forEach(item => {
+            // Pick a simple icon based on category
+            let icon = '🛒';
+            if (item.category === 'Food') icon = '🍽️';
+            else if (item.category === 'Transport') icon = '🚗';
+            else if (item.category === 'Energy') icon = '⚡';
+            
+            // Format footprint coloring
+            let fpColor = 'var(--text-muted)';
+            if (item.kg_co2e > 10) fpColor = 'var(--accent)';
+            else if (item.kg_co2e < 2) fpColor = 'var(--primary-dark)';
+            
+            itemsHtml += `
+                <li>${icon} <span class="font-bold">${item.item_name}</span> 
+                → <span style="color: ${fpColor}; font-weight: 500;">${Number(item.kg_co2e).toFixed(2)} kg CO2e</span></li>
+            `;
+        });
+    } else {
+        itemsHtml = '<li>No items cleanly extracted.</li>';
+    }
+
+    feedback.innerHTML = `
+        <div class="card" style="border-left: 4px solid var(--primary-dark); animation: slideIn 0.3s ease-out;">
+            <div style="display: flex; gap: 1rem;">
+                <div class="ai-icon">
+                    <i data-lucide="check-circle"></i>
+                </div>
+                <div>
+                    <p class="text-sm font-bold">Receipt Parsed Successfully</p>
+                    <p class="text-xs text-muted mb-2">Source: ${filename}</p>
+                    <p class="text-sm mt-1">Here is the carbon footprint breakdown of your items:</p>
+                    <ul style="font-size: 0.875rem; color: var(--text-muted); margin-top: 0.8rem; list-style: none; display: flex; flex-direction: column; gap: 0.5rem;">
+                        ${itemsHtml}
+                    </ul>
+                    <div class="mt-4">
+                        <button class="btn btn-primary btn-sm" onclick="window.location.reload()">Refresh Footprint</button>
                     </div>
                 </div>
             </div>
-        `;
+        </div>
+    `;
+    
+    if (window.lucide) {
         window.lucide.createIcons();
-    }, 2000);
+    }
 }
 
 // Event Listeners for Nav
