@@ -1,4 +1,104 @@
+let __prevViewName = null;
+
+const LEADERBOARD_CACHE_TTL_MS = 30000;
+let __leaderboardCache = { at: 0, payload: null };
+
+function showToast(message, type = 'info') {
+    const c = document.getElementById('toast-container');
+    if (!c || !message) return;
+    const t = document.createElement('div');
+    const safeType = type === 'error' ? 'error' : type === 'success' ? 'success' : 'info';
+    t.className = `ec-toast ec-toast--${safeType}`;
+    t.setAttribute('role', 'status');
+    t.textContent = message;
+    c.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('ec-toast--show'));
+    setTimeout(() => {
+        t.classList.remove('ec-toast--show');
+        t.classList.add('ec-toast--hide');
+        setTimeout(() => t.remove(), 420);
+    }, 3000);
+}
+
+function setDashboardLoading(loading) {
+    const sk = document.getElementById('dashboard-stat-skeleton');
+    const grid = document.getElementById('dashboard-stat-grid');
+    const hsk = document.getElementById('dashboard-habits-skeleton');
+    const hbody = document.getElementById('dashboard-habits-body');
+    if (loading) {
+        if (sk) sk.hidden = false;
+        if (grid) {
+            grid.hidden = true;
+            grid.style.opacity = '';
+            grid.style.transition = '';
+        }
+        if (hsk) hsk.hidden = false;
+        if (hbody) hbody.hidden = true;
+    } else {
+        if (sk) sk.hidden = true;
+        if (grid) {
+            grid.hidden = false;
+            grid.style.opacity = '0';
+            grid.style.transition = 'opacity 0.5s ease';
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    grid.style.opacity = '1';
+                });
+            });
+        }
+        if (hsk) hsk.hidden = true;
+        if (hbody) hbody.hidden = false;
+    }
+}
+
+function renderUploadFeedbackShell(activeStep) {
+    const feedback = document.getElementById('ai-feedback');
+    if (!feedback) return;
+    const steps = [
+        { id: 'uploading', label: 'Uploading' },
+        { id: 'analyzing', label: 'Analyzing' },
+        { id: 'processing', label: 'Processing' },
+        { id: 'done', label: 'Done' },
+    ];
+    const activeIdx = Math.max(
+        0,
+        steps.findIndex((s) => s.id === activeStep)
+    );
+    const stepHtml = steps
+        .map((s, i) => {
+            let cls = 'upload-step';
+            if (i === activeIdx) cls += ' upload-step--active';
+            if (i < activeIdx) cls += ' upload-step--done';
+            const pulse = i === activeIdx && activeStep !== 'done' ? ' pulse' : '';
+            const mark = i < activeIdx ? '✓' : i === activeIdx ? '●' : '○';
+            return `<div class="${cls}"><span class="upload-step-icon${pulse}">${mark}</span>${escapeHtml(
+                s.label
+            )}</div>`;
+        })
+        .join('');
+    feedback.innerHTML = `
+        <div class="card" style="padding: 1.25rem;">
+            <div class="upload-feedback-steps">${stepHtml}</div>
+            <div class="processing-container pulse" style="margin-top: 0.75rem;">
+                <div style="display: flex; gap: 1rem; align-items: center;">
+                    <i data-lucide="loader" class="pulse"></i>
+                    <p class="text-sm font-bold">EcoCart AI is working on your receipt…</p>
+                </div>
+            </div>
+        </div>`;
+    if (window.lucide) window.lucide.createIcons();
+}
+
 function switchView(viewName) {
+    const smViews = ['supermarket', 'store', '3d'];
+    if (
+        smViews.includes(__prevViewName) &&
+        !smViews.includes(viewName) &&
+        typeof window.stopSupermarketRender === 'function'
+    ) {
+        window.stopSupermarketRender();
+    }
+
     // Hide all sections
     document.querySelectorAll('.view-section').forEach(section => {
         section.classList.remove('active');
@@ -11,8 +111,11 @@ function switchView(viewName) {
     }
     
     // Update active state in nav
-    document.querySelectorAll('.nav-link').forEach(link => {
+    document.querySelectorAll('.nav-link').forEach((link) => {
         link.classList.toggle('active', link.dataset.view === viewName);
+    });
+    document.querySelectorAll('.mobile-tab-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.view === viewName);
     });
 
     if (viewName === 'log') {
@@ -20,10 +123,41 @@ function switchView(viewName) {
         resetLogView();
     }
 
+    if (viewName === 'dashboard') {
+        void refreshDashboardData().then(() => loadBadges());
+    }
+
+    if (viewName === 'leaderboard') {
+        loadLeaderboard();
+    }
+
+    if (viewName === 'supermarket' || viewName === 'store' || viewName === '3d') {
+        setTimeout(() => {
+            if (typeof window.initSupermarket === 'function') {
+                window.initSupermarket();
+            } else {
+                console.error('initSupermarket not available — check supermarket3d.js / import map');
+            }
+        }, 60);
+    }
+
+    if (viewName === 'history') {
+        initHistoryViewIfNeeded();
+    }
+
+    if (viewName !== 'history') {
+        window.__chatFocusedReceiptId = null;
+        document.querySelectorAll('.history-receipt-card.is-focused').forEach((el) => {
+            el.classList.remove('is-focused');
+        });
+    }
+
     // Re-create icons for new content
     if (window.lucide) {
         window.lucide.createIcons();
     }
+
+    __prevViewName = viewName;
 }
 
 // Reset the Log View UI
@@ -33,28 +167,24 @@ function resetLogView() {
     
     // Hide the results but restore the loading template for next time
     feedback.style.display = 'none';
-    feedback.innerHTML = `
-        <div class="processing-container pulse">
-            <div style="display: flex; gap: 1rem; align-items: center;">
-                <i data-lucide="loader" class="pulse"></i>
-                <p class="text-sm font-bold">AI Analyzing your receipt...</p>
-            </div>
-        </div>
-    `;
-    if (window.lucide) window.lucide.createIcons();
+    renderUploadFeedbackShell('analyzing');
 }
 
 // Global Refresh Suite
 async function refreshAllData() {
+    __leaderboardCache.at = 0;
     await Promise.all([
         refreshDashboardData(),
         refreshHistoryView()
     ]);
+    const dash = document.getElementById('view-dashboard');
+    if (dash && dash.classList.contains('active')) {
+        loadBadges();
+    }
 }
 
 // File Upload Logic
 function initUpload() {
-// ... existing initUpload logic skipped to use replace_file_content properly ...
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
@@ -75,53 +205,668 @@ function initUpload() {
         feedback.style.display = 'block';
         feedback.scrollIntoView({ behavior: 'smooth' });
 
+        renderUploadFeedbackShell('uploading');
+        await new Promise((r) => setTimeout(r, 220));
+        renderUploadFeedbackShell('analyzing');
+
         try {
             const response = await fetch('/api/upload', {
                 method: 'POST',
-                body: formData
+                body: formData,
             });
-            const result = await response.json();
-            
+            let result;
+            try {
+                result = await response.json();
+            } catch (parseErr) {
+                showToast('Upload failed: invalid server response', 'error');
+                resetLogView();
+                return;
+            }
+            renderUploadFeedbackShell('processing');
+            await new Promise((r) => setTimeout(r, 180));
+
             if (result.status === 'success') {
-                displayAIResults(result.filename, result.data);
+                renderUploadFeedbackShell('done');
+                const pts = result.points_awarded || result.points || 0;
+                const p = Number(pts) || 0;
+                if (p > 0) {
+                    showToast(`Receipt uploaded successfully! +${p} pts`, 'success');
+                } else {
+                    showToast('Receipt uploaded successfully!', 'success');
+                }
+                displayAIResults(result);
             } else {
-                alert("Upload failed: " + result.error);
+                showToast(result.error || 'Upload failed', 'error');
+                resetLogView();
             }
         } catch (err) {
             console.error(err);
-            alert("An error occurred during upload.");
+            showToast('An error occurred during upload.', 'error');
+            resetLogView();
         }
     };
 }
 
-// Dynamic AI Rendering
-function displayAIResults(filename, data) {
+function escapeHtml(s) {
+    if (s == null || s === '') return '';
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+}
+
+function escapeAttr(s) {
+    if (s == null || s === '') return '';
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;');
+}
+
+function categoryIcon(cat) {
+    const c = (cat || '').toLowerCase();
+    if (c === 'meat') return '🥩';
+    if (c === 'dairy') return '🥛';
+    if (c === 'produce') return '🥬';
+    if (c === 'beverages') return '🥤';
+    if (c === 'grains') return '🌾';
+    if (c === 'snacks') return '🍿';
+    if (c === 'frozen') return '🧊';
+    if (c === 'household') return '🧹';
+    if (c === 'food') return '🍽️';
+    if (c === 'transport') return '🚗';
+    if (c === 'energy') return '⚡';
+    return '🛒';
+}
+
+function categorySlug(cat) {
+    let s = String(cat || 'other')
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]+/g, '')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+    if (!s) s = 'other';
+    return s;
+}
+
+function getGreetingWord() {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 17) return 'Good afternoon';
+    return 'Good evening';
+}
+
+function getEcoLevel(points) {
+    const p = Math.max(0, Number(points) || 0);
+    if (p <= 100) return { title: 'Seedling 🌱', nextAt: 101, start: 0, span: 100 };
+    if (p <= 500) return { title: 'Sprout 🌿', nextAt: 501, start: 100, span: 400 };
+    if (p <= 1000) return { title: 'Sapling 🌳', nextAt: 1001, start: 500, span: 500 };
+    if (p <= 2500) return { title: 'Evergreen 🌲', nextAt: 2501, start: 1000, span: 1500 };
+    return { title: 'Guardian 🛡️', nextAt: null, start: 2501, span: null };
+}
+
+function levelProgressPercent(points) {
+    const info = getEcoLevel(points);
+    if (info.nextAt == null) return 100;
+    const into = points - info.start;
+    return Math.min(100, Math.max(0, (into / info.span) * 100));
+}
+
+function nextLevelLabel(points) {
+    const info = getEcoLevel(points);
+    if (!info.nextAt) return 'You reached Guardian — keep earning EcoPoints!';
+    const need = Math.max(0, info.nextAt - points);
+    if (points <= 100) return `${need} EcoPoints to Sprout 🌿`;
+    if (points <= 500) return `${need} EcoPoints to Sapling 🌳`;
+    if (points <= 1000) return `${need} EcoPoints to Evergreen 🌲`;
+    if (points <= 2500) return `${need} EcoPoints to Guardian 🛡️`;
+    return 'You reached Guardian — keep earning EcoPoints!';
+}
+
+function updateLevelUI(points, streakCount) {
+    const p = Number(points) || 0;
+    const info = getEcoLevel(p);
+    const pill = document.getElementById('dash-level-pill');
+    if (pill) pill.textContent = info.title;
+    const fill = document.getElementById('dash-level-progress-fill');
+    if (fill) fill.style.width = `${levelProgressPercent(p)}%`;
+    const cap = document.getElementById('dash-level-next');
+    if (cap) cap.textContent = nextLevelLabel(p);
+
+    const sbFill = document.getElementById('sidebar-level-fill');
+    if (sbFill) sbFill.style.width = `${levelProgressPercent(p)}%`;
+
+    const sbLevel = document.getElementById('sidebar-level-line');
+    if (sbLevel) sbLevel.textContent = info.title;
+    const sbPts = document.getElementById('sidebar-points-line');
+    if (sbPts) sbPts.textContent = `${p} EcoPoints`;
+    const sbStreakText = document.getElementById('sidebar-streak-text');
+    const sbFire = document.getElementById('sidebar-streak-fire');
+    const sc = Number(streakCount) || 0;
+    if (sbStreakText) sbStreakText.textContent = `${sc} day streak`;
+    if (sbFire) {
+        if (sc > 0) {
+            sbFire.style.display = 'inline-block';
+            const scale = 1 + Math.min(sc, 21) * 0.022;
+            sbFire.style.transform = `scale(${scale})`;
+        } else {
+            sbFire.style.display = 'none';
+        }
+    }
+}
+
+function levelNameWithEmoji(levelName) {
+    const m = {
+        Seedling: 'Seedling 🌱',
+        Sprout: 'Sprout 🌿',
+        Sapling: 'Sapling 🌳',
+        Evergreen: 'Evergreen 🌲',
+        Guardian: 'Guardian 🛡️',
+    };
+    return m[levelName] || levelName;
+}
+
+function showPointsFloater(amount) {
+    const n = Number(amount) || 0;
+    if (n === 0) return;
+    const anchor =
+        document.getElementById('sidebar-points-line') ||
+        document.querySelector('.user-profile');
+    const target = anchor && anchor.closest('.user-profile') ? anchor.closest('.user-profile') : anchor;
+    const targetEl = target || document.body;
+    if (targetEl && getComputedStyle(targetEl).position === 'static') {
+        targetEl.style.position = 'relative';
+    }
+    const el = document.createElement('span');
+    el.className = 'points-floater';
+    el.textContent = n > 0 ? `+${n} pts` : `${n} pts`;
+    targetEl.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('points-floater--animate'));
+    setTimeout(() => el.remove(), 1600);
+}
+
+function animateStatCountUp(el, target, decimals, suffixHtml) {
+    if (!el) return;
+    const end = Number(target) || 0;
+    const t0 = performance.now();
+    const duration = 800;
+    function tick(now) {
+        const t = Math.min(1, (now - t0) / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        const val = end * eased;
+        const txt = decimals === 0 ? String(Math.round(val)) : val.toFixed(decimals);
+        el.innerHTML = txt + (suffixHtml || '');
+        if (t < 1) requestAnimationFrame(tick);
+        else {
+            const finalTxt = decimals === 0 ? String(Math.round(end)) : end.toFixed(decimals);
+            el.innerHTML = finalTxt + (suffixHtml || '');
+        }
+    }
+    requestAnimationFrame(tick);
+}
+
+function animateHabitBarsDeferred() {
+    const root = document.getElementById('view-dashboard');
+    if (!root) return;
+    const fills = root.querySelectorAll('.habit-fill');
+    fills.forEach((f) => {
+        f.style.width = '0%';
+        f.style.transitionDelay = '0s';
+    });
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            fills.forEach((f, i) => {
+                f.style.transitionDelay = `${i * 0.07}s`;
+                const pct = parseFloat(f.getAttribute('data-pct'));
+                if (!Number.isNaN(pct)) f.style.width = `${Math.min(100, pct)}%`;
+            });
+        });
+    });
+}
+
+function animateWeeklyBarsDeferred() {
+    const root = document.getElementById('view-dashboard');
+    if (!root) return;
+    const bars = root.querySelectorAll('.weekly-bar');
+    bars.forEach((b) => {
+        b.style.height = '0%';
+    });
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            bars.forEach((b) => {
+                const pct = parseFloat(b.getAttribute('data-height-pct'));
+                if (!Number.isNaN(pct)) b.style.height = `${Math.min(100, pct)}%`;
+            });
+        });
+    });
+}
+
+function runDashboardEnterAnimations() {
+    const dash = document.getElementById('view-dashboard');
+    if (!dash || !dash.classList.contains('active')) return;
+
+    const greet = document.getElementById('dash-greeting-word');
+    if (greet) greet.textContent = getGreetingWord();
+
+    const points = parseInt(dash.getAttribute('data-user-points'), 10) || 0;
+    const streak = parseInt(dash.getAttribute('data-streak-count'), 10);
+    updateLevelUI(points, Number.isFinite(streak) ? streak : 0);
+
+    const s1 = document.getElementById('stat-total-co2');
+    const s2 = document.getElementById('stat-co2-saved');
+    const s3 = document.getElementById('stat-receipts');
+    const t1 = parseFloat(s1?.getAttribute('data-target')) || 0;
+    const t2 = parseFloat(s2?.getAttribute('data-target')) || 0;
+    const t3 = parseInt(s3?.getAttribute('data-target'), 10) || 0;
+    animateStatCountUp(s1, t1, 1, '');
+    animateStatCountUp(s2, t2, 1, '');
+    animateStatCountUp(s3, t3, 0, '');
+
+    animateHabitBarsDeferred();
+    animateWeeklyBarsDeferred();
+}
+
+function renderDashboardHabits(trends, totalCo2) {
+    const body = document.getElementById('dashboard-habits-body');
+    if (!body) return;
+    const entries = Object.entries(trends || {});
+    if (!entries.length) {
+        body.innerHTML =
+            '<p class="text-sm text-muted">Upload receipts to track your habits.</p>';
+        return;
+    }
+    const denom = Math.max(Number(totalCo2) || 0, 1e-6);
+    body.innerHTML = entries
+        .map(([cat, amount]) => {
+            const amt = Number(amount) || 0;
+            const pct = Math.min(100, (amt / denom) * 100);
+            const esc = escapeHtml(cat);
+            return `
+            <div class="habit-row" data-category="${esc}">
+                <div class="habit-row-header">
+                    <p class="text-sm font-bold">${esc}</p>
+                    <p class="text-xs habit-kg">${amt.toFixed(2)} kg CO2e</p>
+                </div>
+                <div class="habit-track">
+                    <div class="habit-fill" data-pct="${pct}" style="width: 0%;"></div>
+                </div>
+            </div>`;
+        })
+        .join('');
+}
+
+function renderDashboardWeekly(weeklyTrend, weeklyMax) {
+    const chart = document.getElementById('dashboard-weekly-chart');
+    if (!chart || !weeklyTrend) return;
+    const max = Math.max(
+        Number(weeklyMax) || 0.01,
+        ...weeklyTrend.map((w) => Number(w.total_co2) || 0),
+        0.01
+    );
+    chart.innerHTML = weeklyTrend
+        .map((w) => {
+            const co2 = Number(w.total_co2) || 0;
+            const h = max > 0 ? (co2 / max) * 100 : 0;
+            return `
+            <div class="weekly-chart-col">
+                <div class="weekly-bar-wrap">
+                    <div class="weekly-bar" data-height-pct="${h}" style="height: 0%;"></div>
+                </div>
+                <p class="weekly-bar-value">${co2.toFixed(2)} kg</p>
+                <p class="weekly-bar-label">${escapeHtml(w.week_label)}</p>
+            </div>`;
+        })
+        .join('');
+}
+
+function renderTopOffendersList(rows) {
+    const el = document.getElementById('dashboard-top-offenders');
+    if (!el) return;
+    if (!rows || !rows.length) {
+        const dash = document.getElementById('view-dashboard');
+        const rc = Number(dash?.getAttribute('data-stat-receipts')) || 0;
+        if (rc === 0) {
+            el.innerHTML = `<div class="empty-state-card" style="padding: 1.25rem; text-align: center;">
+                <p class="text-sm font-bold" style="margin-bottom: 0.5rem;">Upload your first receipt to start tracking!</p>
+                <button type="button" class="btn btn-outline btn-sm js-empty-cta-upload">Upload receipt</button>
+            </div>`;
+        } else {
+            el.innerHTML =
+                '<p class="text-sm text-muted">Upload receipts to see your highest-impact purchases.</p>';
+        }
+        return;
+    }
+    el.innerHTML = `<div class="top-offenders-list">${rows
+        .map((row) => {
+            const slug = categorySlug(row.category);
+            const brandLine = row.brand
+                ? `<p class="text-xs text-muted">${escapeHtml(row.brand)}</p>`
+                : '';
+            const ridSafe = String(row.receipt_id || '').replace(/"/g, '');
+            const swapBtn = ridSafe
+                ? `<button type="button" class="link-swap js-swap-for-receipt" data-receipt-id="${ridSafe}">Find a swap</button>`
+                : '';
+            return `
+            <div class="top-offender-row">
+                <div class="top-offender-main">
+                    <span class="category-dot category-dot--${slug}" title="${escapeHtml(row.category)}"></span>
+                    <div>
+                        <p class="text-sm font-bold">${escapeHtml(row.item_name)}</p>
+                        ${brandLine}
+                        <span class="category-chip category-chip--${slug}">${escapeHtml(row.category)}</span>
+                    </div>
+                </div>
+                <div class="top-offender-meta">
+                    <p class="text-sm font-bold text-high-impact">${Number(row.kg_co2e).toFixed(2)} kg</p>
+                    ${swapBtn}
+                </div>
+            </div>`;
+        })
+        .join('')}</div>`;
+}
+
+function renderUserSwapsCard(swaps) {
+    let wrap = document.getElementById('dashboard-user-swaps');
+    let heading = document.getElementById('dashboard-swaps-heading');
+    if (!swaps || !swaps.length) {
+        if (wrap) wrap.remove();
+        if (heading) heading.remove();
+        return;
+    }
+    if (!wrap) {
+        const anchor = document.getElementById('dashboard-offender-swap-results');
+        const parent = anchor?.parentNode || document.getElementById('view-dashboard');
+        if (!parent) return;
+        heading = document.createElement('h3');
+        heading.className = 'text-lg mb-2 mt-4';
+        heading.id = 'dashboard-swaps-heading';
+        heading.textContent = 'Your Swap Ideas';
+        wrap = document.createElement('div');
+        wrap.className = 'card dashboard-swaps-card';
+        wrap.id = 'dashboard-user-swaps';
+        if (anchor && anchor.nextSibling) {
+            parent.insertBefore(heading, anchor.nextSibling);
+            parent.insertBefore(wrap, heading.nextSibling);
+        } else {
+            parent.appendChild(heading);
+            parent.appendChild(wrap);
+        }
+    } else if (!heading) {
+        heading = document.createElement('h3');
+        heading.className = 'text-lg mb-2 mt-4';
+        heading.id = 'dashboard-swaps-heading';
+        heading.textContent = 'Your Swap Ideas';
+        wrap.parentNode.insertBefore(heading, wrap);
+    }
+    const slice = swaps.slice(0, 8);
+    wrap.innerHTML = `<ul class="dashboard-swaps-list">${slice
+        .map((sw) => {
+            const sid = sw.id != null ? String(sw.id) : '';
+            const accepted = Boolean(sw.accepted);
+            const btnClass = `btn btn-outline btn-sm js-accept-swap${accepted ? ' is-accepted' : ''}`;
+            const btnDis = accepted ? ' disabled aria-label="Accepted"' : '';
+            const btnInner = accepted
+                ? '<i data-lucide="check" class="swap-accept-icon"></i> Accepted'
+                : 'Accept Swap';
+            const liCls = accepted ? 'dashboard-swap-li dashboard-swap-li--accepted' : 'dashboard-swap-li';
+            return `
+        <li class="${liCls}">
+            <div class="dashboard-swap-li-main">
+                <span class="text-sm"><strong>${escapeHtml(sw.original_product)}</strong> → ${
+                    sw.recommended_brand ? `${escapeHtml(sw.recommended_brand)} ` : ''
+                }${escapeHtml(sw.recommended_product)}</span>
+                <span class="text-xs" style="color: var(--green-impact); font-weight: 600;">Save ~${Number(
+                    sw.co2_savings
+                ).toFixed(2)} kg</span>
+            </div>
+            <button type="button" class="${btnClass}" data-swap-id="${escapeHtml(sid)}"${btnDis}>${btnInner}</button>
+        </li>`;
+        })
+        .join('')}</ul>`;
+    if (window.lucide) window.lucide.createIcons();
+}
+
+function renderRecentActivitiesDash(list) {
+    const listContainer = document.getElementById('dashboard-recent-activities');
+    if (!listContainer) return;
+    if (!list || !list.length) {
+        const dash = document.getElementById('view-dashboard');
+        const rc = Number(dash?.getAttribute('data-stat-receipts')) || 0;
+        if (rc === 0) {
+            listContainer.innerHTML = `<div class="empty-state-card" style="padding: 1.75rem; text-align: center;">
+                <p class="text-sm font-bold" style="margin-bottom: 0.5rem;">Upload your first receipt to start tracking!</p>
+                <p class="text-xs text-muted mb-3">We will estimate carbon per item and build your habits chart.</p>
+                <button type="button" class="btn btn-primary btn-sm js-empty-cta-upload">Upload receipt</button>
+            </div>`;
+        } else {
+            listContainer.innerHTML =
+                '<p class="text-sm text-muted" style="padding: 1.5rem;">No activities logged yet.</p>';
+        }
+        return;
+    }
+    listContainer.innerHTML = list
+        .map((a) => {
+            const slug = categorySlug(a.category);
+            let colorClass = '';
+            if (a.kg_co2e > 5) colorClass = 'text-high-impact';
+            else if (a.kg_co2e < 1.5) colorClass = 'text-low-impact';
+            const brandPart = a.brand
+                ? `<span class="font-medium">${escapeHtml(a.brand)}</span> · `
+                : '';
+            return `
+            <div class="dash-recent-row" style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; border-bottom: 1px solid var(--border);">
+                <div style="display: flex; gap: 0.75rem; align-items: center; min-width: 0;">
+                    <span class="category-dot category-dot--${slug}" title="${escapeHtml(a.category)}"></span>
+                    <div style="background: #f1f5f9; padding: 0.5rem; border-radius: 8px; flex-shrink: 0;">
+                        <i data-lucide="shopping-bag" size="18"></i>
+                    </div>
+                    <div style="min-width: 0;">
+                        <p class="text-sm font-bold" style="overflow-wrap: break-word;">${escapeHtml(a.item_name)}</p>
+                        <p class="text-xs text-muted">${brandPart}${escapeHtml(a.category || 'General')}</p>
+                    </div>
+                </div>
+                <p class="text-sm font-bold flex-shrink-0 ${colorClass}">${Number(a.kg_co2e).toFixed(2)}kg</p>
+            </div>`;
+        })
+        .join('');
+    if (window.lucide) window.lucide.createIcons();
+}
+
+function applyDashboardStatsPayload(data) {
+    if (!data) return;
+    const dash = document.getElementById('view-dashboard');
+    if (dash) {
+        dash.setAttribute('data-stat-co2', data.total_co2);
+        dash.setAttribute('data-stat-saved', data.total_co2_saved);
+        dash.setAttribute('data-stat-receipts', data.receipts_count);
+        dash.setAttribute('data-user-points', data.points);
+        dash.setAttribute('data-streak-count', data.streak_count ?? 0);
+    }
+    const s1 = document.getElementById('stat-total-co2');
+    const s2 = document.getElementById('stat-co2-saved');
+    const s3 = document.getElementById('stat-receipts');
+    if (s1) s1.setAttribute('data-target', data.total_co2 ?? 0);
+    if (s2) s2.setAttribute('data-target', data.total_co2_saved ?? 0);
+    if (s3) s3.setAttribute('data-target', data.receipts_count ?? 0);
+
+    const iw = document.getElementById('dash-items-week');
+    if (iw) iw.textContent = data.items_this_week;
+
+    updateLevelUI(data.points, data.streak_count);
+
+    renderDashboardHabits(data.trends, data.total_co2);
+    renderDashboardWeekly(data.weekly_trend, data.weekly_chart_max);
+    renderTopOffendersList(data.top_offenders);
+    renderUserSwapsCard(data.user_swaps);
+    renderRecentActivitiesDash(data.recent_activities);
+}
+
+async function fetchSwapsForDashboard(receiptId) {
+    const panel = document.getElementById('dashboard-offender-swap-results');
+    if (!panel || !receiptId) return;
+    panel.style.display = 'block';
+    panel.innerHTML =
+        '<p class="text-xs text-muted">Loading swap ideas for this receipt…</p>';
+    try {
+        const response = await fetch('/api/generate-swaps', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ receipt_id: receiptId }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            showToast(payload.error || 'Could not load swaps', 'error');
+            panel.innerHTML = `<p class="text-sm" style="color: var(--accent);">${escapeHtml(
+                payload.error || 'Could not load swaps'
+            )}</p>`;
+            return;
+        }
+        const swaps = payload.swaps || [];
+        if (!swaps.length) {
+            panel.innerHTML =
+                '<p class="text-sm text-muted">No swap suggestions matched this receipt.</p>';
+            return;
+        }
+        showToast('Swap recommendation ready!', 'success');
+        let cards = '';
+        swaps.forEach((sw) => {
+            const brand = sw.recommended_brand
+                ? `${escapeHtml(sw.recommended_brand)} `
+                : '';
+            const aisleRow = sw.aisle_location
+                ? `<p class="text-xs text-muted mt-2" style="opacity: 0.75;">${escapeHtml(
+                      sw.aisle_location
+                  )}</p>`
+                : '';
+            const sid = sw.swap_id != null ? String(sw.swap_id) : '';
+            cards += `
+                <div class="card swap-rec-card" style="margin-top: 0.75rem; padding: 1rem; border-left: 3px solid var(--green-impact);">
+                    <p class="text-sm font-bold" style="margin-bottom: 0.35rem;">
+                        Swap <span class="text-muted font-normal">${escapeHtml(
+                            sw.original_product
+                        )}</span>
+                        → <span>${brand}${escapeHtml(sw.recommended_product)}</span>
+                    </p>
+                    <p class="text-sm" style="color: var(--green-impact); font-weight: 700; margin-bottom: 0.35rem;">
+                        Save ~${Number(sw.co2_savings).toFixed(2)} kg CO2e
+                    </p>
+                    <p class="text-xs text-muted" style="line-height: 1.45;">${escapeHtml(sw.reason)}</p>
+                    ${aisleRow}
+                    <button type="button" class="btn btn-primary btn-sm mt-3 js-accept-swap" data-swap-id="${escapeHtml(
+                        sid
+                    )}">Accept Swap</button>
+                </div>`;
+        });
+        panel.innerHTML = `<div class="dashboard-offender-swaps-inner">${cards}</div>`;
+    } catch (e) {
+        console.error(e);
+        showToast('Network error loading swaps.', 'error');
+        panel.innerHTML =
+            '<p class="text-sm" style="color: var(--accent);">Network error loading swaps.</p>';
+    }
+}
+
+async function loadSwapRecommendations(receiptId) {
+    const container = document.getElementById('swap-recommendations-container');
+    const btn = document.getElementById('btn-get-swaps');
+    if (!container || !receiptId) return;
+    container.innerHTML = '<p class="text-xs text-muted">Loading recommendations…</p>';
+    if (btn) {
+        btn.disabled = true;
+    }
+    try {
+        const response = await fetch('/api/generate-swaps', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ receipt_id: receiptId })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            showToast(payload.error || 'Could not load swaps', 'error');
+            container.innerHTML = `<p class="text-xs" style="color: var(--accent);">${escapeHtml(payload.error || 'Could not load swaps')}</p>`;
+            return;
+        }
+        const swaps = payload.swaps || [];
+        if (swaps.length === 0) {
+            container.innerHTML = '<p class="text-xs text-muted">No swap suggestions could be matched to your line items.</p>';
+            return;
+        }
+        showToast('Swap recommendation ready!', 'success');
+        let cards = '';
+        swaps.forEach((sw) => {
+            const brand = sw.recommended_brand
+                ? `${escapeHtml(sw.recommended_brand)} `
+                : '';
+            const aisleRow = sw.aisle_location
+                ? `<p class="text-xs text-muted mt-2" style="opacity: 0.75;">${escapeHtml(sw.aisle_location)}</p>`
+                : '';
+            const sid = sw.swap_id != null ? String(sw.swap_id) : '';
+            cards += `
+                <div class="card swap-rec-card" style="margin-top: 0.75rem; padding: 1rem; border-left: 3px solid var(--green-impact);">
+                    <p class="text-sm font-bold" style="margin-bottom: 0.35rem;">
+                        Swap <span class="text-muted font-normal">${escapeHtml(sw.original_product)}</span>
+                        → <span>${brand}${escapeHtml(sw.recommended_product)}</span>
+                    </p>
+                    <p class="text-sm" style="color: var(--green-impact); font-weight: 700; margin-bottom: 0.35rem;">
+                        Save ~${Number(sw.co2_savings).toFixed(2)} kg CO2e
+                    </p>
+                    <p class="text-xs text-muted" style="line-height: 1.45;">${escapeHtml(sw.reason)}</p>
+                    ${aisleRow}
+                    <button type="button" class="btn btn-primary btn-sm mt-3 js-accept-swap" data-swap-id="${escapeHtml(
+                        sid
+                    )}">Accept Swap</button>
+                </div>
+            `;
+        });
+        container.innerHTML = cards;
+    } catch (e) {
+        console.error(e);
+        showToast('Network error loading swaps.', 'error');
+        container.innerHTML = '<p class="text-xs" style="color: var(--accent);">Network error loading swaps.</p>';
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+// Dynamic AI Rendering — result: { filename, store_name, receipt_id, data }
+function displayAIResults(result) {
     const feedback = document.getElementById('ai-feedback');
-    
-    // Construct the items list dynamically
+    const filename = result.filename || '';
+    const storeName = result.store_name;
+    const receiptId = result.receipt_id;
+    const data = result.data || [];
+
     let itemsHtml = '';
-    if (data && data.length > 0) {
-        data.forEach(item => {
-            // Pick a simple icon based on category
-            let icon = '🛒';
-            if (item.category === 'Food') icon = '🍽️';
-            else if (item.category === 'Transport') icon = '🚗';
-            else if (item.category === 'Energy') icon = '⚡';
-            
-            // Format footprint coloring
-            // Format footprint coloring
+    if (data.length > 0) {
+        data.forEach((item) => {
+            const icon = categoryIcon(item.category);
             let fpColor = 'var(--text-muted)';
-            if (item.kg_co2e > 5) fpColor = 'var(--accent)';
-            else if (item.kg_co2e < 1.5) fpColor = 'var(--green-impact)';
-            
+            const kg = Number(item.kg_co2e);
+            if (kg > 5) fpColor = 'var(--accent)';
+            else if (kg < 1.5) fpColor = 'var(--green-impact)';
+            const brandHtml = item.brand
+                ? ` <span class="text-xs" style="opacity: 0.85;">(${escapeHtml(item.brand)})</span>`
+                : '';
             itemsHtml += `
-                <li>${icon} <span class="font-bold">${item.item_name}</span> 
-                → <span style="color: ${fpColor}; font-weight: 700;">${Number(item.kg_co2e).toFixed(2)} kg CO2e</span></li>
+                <li>${icon} <span class="font-bold">${escapeHtml(item.item_name)}</span>${brandHtml}
+                → <span style="color: ${fpColor}; font-weight: 700;">${kg.toFixed(2)} kg CO2e</span></li>
             `;
         });
     } else {
         itemsHtml = '<li>No items cleanly extracted.</li>';
     }
+
+    const storeLine = storeName
+        ? `<p class="text-xs text-muted mb-1">Store: <span class="font-bold">${escapeHtml(storeName)}</span></p>`
+        : '';
+
+    const swapBlock =
+        receiptId
+            ? `
+        <button type="button" class="btn btn-outline btn-sm mt-3" id="btn-get-swaps">Get Swap Recommendations</button>
+        <div id="swap-recommendations-container" class="mt-2"></div>
+    `
+            : '';
 
     feedback.innerHTML = `
         <div class="card" style="border-left: 4px solid var(--primary-dark); animation: slideIn 0.3s ease-out;">
@@ -129,13 +874,15 @@ function displayAIResults(filename, data) {
                 <div class="ai-icon">
                     <i data-lucide="check-circle"></i>
                 </div>
-                <div>
+                <div style="flex: 1; min-width: 0;">
                     <p class="text-sm font-bold">Receipt Parsed Successfully</p>
-                    <p class="text-xs text-muted mb-2">Source: ${filename}</p>
+                    ${storeLine}
+                    <p class="text-xs text-muted mb-2">Source: ${escapeHtml(filename)}</p>
                     <p class="text-sm mt-1">Here is the carbon footprint breakdown of your items:</p>
                     <ul style="font-size: 0.875rem; color: var(--text-muted); margin-top: 0.8rem; list-style: none; display: flex; flex-direction: column; gap: 0.5rem;">
                         ${itemsHtml}
                     </ul>
+                    ${swapBlock}
                     <div class="mt-4">
                         <button class="btn btn-primary btn-sm" onclick="refreshAllData(); switchView('dashboard');">Close & Refresh</button>
                     </div>
@@ -143,7 +890,20 @@ function displayAIResults(filename, data) {
             </div>
         </div>
     `;
-    
+
+    if (receiptId) {
+        const btn = document.getElementById('btn-get-swaps');
+        if (btn) {
+            btn.addEventListener('click', () => loadSwapRecommendations(receiptId));
+        }
+    }
+
+    if (result.points_awarded) {
+        showPointsFloater(result.points_awarded);
+    }
+    void refreshHistoryView();
+    void refreshDashboardData().then(() => loadBadges());
+
     if (window.lucide) {
         window.lucide.createIcons();
     }
@@ -151,186 +911,1116 @@ function displayAIResults(filename, data) {
 
 // Dynamic Dashboard Refresh
 async function refreshDashboardData() {
+    const showSkel = window.__dashboardStatsFetchedOnce === true;
+    window.__dashboardStatsFetchedOnce = true;
+    if (showSkel) setDashboardLoading(true);
     try {
         const response = await fetch('/api/stats');
-        const data = await response.json();
-        
-        // Update Stats
-        document.getElementById('stat-total-co2').innerHTML = `${data.total_co2} <span class="text-sm font-normal">kg CO2e</span>`;
-        document.getElementById('stat-points').innerHTML = `${data.points} <span class="text-sm font-normal">TerraPoints</span>`;
-        document.getElementById('stat-milestone').innerHTML = `${data.points % 100}<span class="text-sm font-normal">/100</span>`;
-        
-        // Update Recent Activities
-        const listContainer = document.getElementById('dashboard-recent-activities');
-        if (data.recent_activities && data.recent_activities.length > 0) {
-            let html = '';
-            data.recent_activities.forEach(a => {
-                let colorClass = '';
-                if (a.kg_co2e > 5) colorClass = 'text-high-impact';
-                else if (a.kg_co2e < 1.5) colorClass = 'text-low-impact';
-                
-                html += `
-                    <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; border-bottom: 1px solid var(--border);">
-                        <div style="display: flex; gap: 0.75rem; align-items: center;">
-                            <div style="background: #f1f5f9; padding: 0.5rem; border-radius: 8px;">
-                                <i data-lucide="shopping-bag" size="18"></i>
-                            </div>
-                            <div>
-                                <p class="text-sm font-bold">${a.item_name}</p>
-                                <p class="text-xs text-muted">Recent Purchase</p>
-                            </div>
-                        </div>
-                        <p class="text-sm font-bold ${colorClass}">${a.kg_co2e.toFixed(2)}kg</p>
-                    </div>
-                `;
-            });
-            listContainer.innerHTML = html;
-            if (window.lucide) window.lucide.createIcons();
+        let data;
+        try {
+            data = await response.json();
+        } catch (parseErr) {
+            throw new Error('Invalid response from server');
         }
+        if (!response.ok) throw new Error(data.error || 'Could not load dashboard stats');
+        applyDashboardStatsPayload(data);
+        runDashboardEnterAnimations();
     } catch (err) {
-        console.error("Dashboard refresh error:", err);
+        console.error('Dashboard refresh error:', err);
+        showToast(err.message || 'Dashboard refresh failed', 'error');
+    } finally {
+        if (showSkel) setDashboardLoading(false);
+    }
+}
+
+const HISTORY_MANUAL_KEY = '__manual__';
+
+const historyState = {
+    receipts: [],
+    page: 0,
+    totalPages: 0,
+    totalReceipts: 0,
+    perPage: 20,
+    loading: false,
+    loadMorePending: false,
+    dirty: true,
+    toolbarBound: false,
+};
+
+function historyCo2Band(total) {
+    const t = Number(total) || 0;
+    if (t > 15) return 'high';
+    if (t >= 5) return 'medium';
+    return 'low';
+}
+
+function historyCo2TotalClass(total) {
+    const t = Number(total) || 0;
+    if (t > 15) return 'text-high-impact';
+    if (t >= 5) return 'history-co2-mid';
+    return 'text-low-impact';
+}
+
+function historyItemCo2Class(kg) {
+    const x = Number(kg) || 0;
+    if (x > 5) return 'text-high-impact';
+    if (x < 1.5) return 'text-low-impact';
+    return '';
+}
+
+function historyCategoryBarHtml(items) {
+    if (!items || !items.length) return '';
+    const counts = {};
+    items.forEach((i) => {
+        const c = i.category || 'Other';
+        counts[c] = (counts[c] || 0) + 1;
+    });
+    const entries = Object.entries(counts);
+    const segs = entries
+        .map(([cat, n]) => {
+            const slug = categorySlug(cat);
+            return `<span class="history-cat-seg history-cat-seg--${slug}" style="flex-grow:${n}" title="${escapeHtml(
+                cat
+            )}"></span>`;
+        })
+        .join('');
+    return `<div class="history-cat-bar" aria-hidden="true">${segs}</div>`;
+}
+
+function filterHistoryReceipts(list) {
+    const q = (document.getElementById('history-search')?.value || '').trim().toLowerCase();
+    const cat = document.getElementById('history-filter-category')?.value || '';
+    let rows = list.slice();
+    if (q) {
+        rows = rows.filter((r) => {
+            const label = String(r.receipt_label || r.receipt_id || '').toLowerCase();
+            const key = String(r.receipt_key || '').toLowerCase();
+            if (label.includes(q) || key.includes(q)) return true;
+            return (r.items || []).some((it) => String(it.name || '').toLowerCase().includes(q));
+        });
+    }
+    if (cat) {
+        rows = rows.filter((r) => (r.items || []).some((it) => (it.category || '') === cat));
+    }
+    return rows;
+}
+
+function renderHistoryReceiptCardsHtml(receipts) {
+    if (!receipts.length) {
+        return `<div class="card history-empty-card">
+            <i data-lucide="archive" size="48" class="text-muted" style="margin-bottom: 1rem;"></i>
+            <h3 class="text-xl">No receipts match</h3>
+            <p class="text-muted mt-2">Try another search, or load more history.</p>
+        </div>`;
+    }
+    return receipts
+        .map((receipt) => {
+            const key = escapeAttr(receipt.receipt_key ?? '');
+            const label = escapeHtml(receipt.receipt_label || receipt.receipt_id || 'Receipt');
+            const band = historyCo2Band(receipt.total_co2);
+            const totalClass = historyCo2TotalClass(receipt.total_co2);
+            const apiId =
+                receipt.receipt_id != null ? escapeAttr(String(receipt.receipt_id)) : '';
+            const hasApiReceipt = receipt.receipt_key !== HISTORY_MANUAL_KEY;
+            const catBar = historyCategoryBarHtml(receipt.items || []);
+            return `
+            <div class="card history-receipt-card history-card--co2-${band}" role="listitem"
+                data-receipt-key="${key}"
+                data-receipt-label="${escapeAttr(receipt.receipt_label || '')}"
+                data-receipt-api-id="${apiId}"
+                data-has-receipt-id="${hasApiReceipt ? '1' : '0'}">
+                <button type="button" class="history-card-header" aria-expanded="false">
+                    <div class="history-card-header-main">
+                        <p class="history-card-kicker">Receipt</p>
+                        <h3 class="history-card-title">${label}</h3>
+                        ${catBar}
+                    </div>
+                    <div class="history-card-header-meta">
+                        <p class="history-card-meta-label">Logged</p>
+                        <p class="history-card-meta-value">${escapeHtml(receipt.date)}</p>
+                        <p class="history-card-meta-label" style="margin-top:0.5rem">Total CO₂e</p>
+                        <p class="history-card-meta-co2 ${totalClass}">${Number(receipt.total_co2).toFixed(2)} kg</p>
+                        <p class="history-card-item-count">${Number(receipt.item_count || 0)} items</p>
+                    </div>
+                    <span class="history-card-chevron" aria-hidden="true"><i data-lucide="chevron-down"></i></span>
+                </button>
+                <div class="history-card-expand">
+                    <div class="history-card-expand-inner" data-detail-loaded="0"></div>
+                </div>
+            </div>`;
+        })
+        .join('');
+}
+
+function updateHistoryLoadMoreButton() {
+    const btn = document.getElementById('history-load-more');
+    if (!btn) return;
+    const more = historyState.page < historyState.totalPages;
+    btn.hidden = !more || historyState.totalReceipts === 0;
+}
+
+function applyHistoryFiltersAndRender() {
+    const listEl = document.getElementById('history-cards-list');
+    if (!listEl) return;
+    const filtered = filterHistoryReceipts(historyState.receipts);
+    if (!historyState.receipts.length && !historyState.loading) {
+        listEl.innerHTML = `<div class="card history-empty-card">
+            <i data-lucide="archive" size="48" class="text-muted" style="margin-bottom: 1rem;"></i>
+            <h3 class="text-xl">No History Yet</h3>
+            <p class="text-muted mt-2 mb-3">Upload your first receipt to start tracking!</p>
+            <button type="button" class="btn btn-primary btn-sm js-empty-cta-upload">Upload receipt</button>
+        </div>`;
+    } else {
+        listEl.innerHTML = renderHistoryReceiptCardsHtml(filtered);
+    }
+    updateHistoryLoadMoreButton();
+    if (window.lucide) window.lucide.createIcons();
+}
+
+function bindHistoryToolbarOnce() {
+    if (historyState.toolbarBound) return;
+    historyState.toolbarBound = true;
+    const search = document.getElementById('history-search');
+    const cat = document.getElementById('history-filter-category');
+    if (search) {
+        search.addEventListener('input', () => applyHistoryFiltersAndRender());
+    }
+    if (cat) {
+        cat.addEventListener('change', () => applyHistoryFiltersAndRender());
+    }
+    const more = document.getElementById('history-load-more');
+    if (more) {
+        more.addEventListener('click', () => loadHistoryPage(historyState.page + 1, false));
+    }
+}
+
+function renderHistorySkeletonList() {
+    const cards = [1, 2, 3]
+        .map(
+            () =>
+                `<div class="history-skeleton-card card"><div class="skeleton-line skeleton-line--md mb-2" style="width:45%"></div><div class="skeleton-line skeleton-line--full"></div></div>`
+        )
+        .join('');
+    return `<div class="history-skeleton-list">${cards}</div>`;
+}
+
+async function loadHistoryPage(page, replace) {
+    const hint = document.getElementById('history-loading-hint');
+    const listEl = document.getElementById('history-cards-list');
+    if (!listEl) return;
+    if (replace) {
+        historyState.loading = true;
+        listEl.innerHTML = renderHistorySkeletonList();
+        if (hint) hint.hidden = false;
+    } else {
+        historyState.loadMorePending = true;
+        const btn = document.getElementById('history-load-more');
+        if (btn) btn.disabled = true;
+    }
+    try {
+        const res = await fetch(
+            `/api/history?page=${page}&per_page=${historyState.perPage}`
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load history');
+        if (replace) {
+            historyState.receipts = data.history || [];
+        } else {
+            historyState.receipts = historyState.receipts.concat(data.history || []);
+        }
+        historyState.page = data.page || page;
+        historyState.totalPages = data.total_pages ?? 0;
+        historyState.totalReceipts = data.total_receipts ?? historyState.receipts.length;
+        historyState.dirty = false;
+        applyHistoryFiltersAndRender();
+    } catch (e) {
+        console.error(e);
+        if (replace && listEl) {
+            listEl.innerHTML = `<p class="text-sm" style="color:var(--accent)">${escapeHtml(
+                e.message || 'Could not load history'
+            )}</p>`;
+        }
+    } finally {
+        historyState.loading = false;
+        historyState.loadMorePending = false;
+        if (hint) hint.hidden = true;
+        const btn = document.getElementById('history-load-more');
+        if (btn) btn.disabled = false;
+        updateHistoryLoadMoreButton();
+    }
+}
+
+async function initHistoryViewIfNeeded() {
+    bindHistoryToolbarOnce();
+    if (historyState.dirty || !historyState.receipts.length) {
+        await loadHistoryPage(1, true);
+    } else {
+        applyHistoryFiltersAndRender();
     }
 }
 
 async function refreshHistoryView() {
-    try {
-        const response = await fetch('/api/history');
-        const data = await response.json();
-        const container = document.getElementById('history-container');
-        if (!container || !data.history) return;
-
-        let html = '';
-        data.history.forEach(receipt => {
-            let rowsHtml = '';
-            receipt.items.forEach(item => {
-                let colorClass = '';
-                if (item.kg_co2e > 5) colorClass = 'text-high-impact';
-                else if (item.kg_co2e < 1.5) colorClass = 'text-low-impact';
-
-                rowsHtml += `
-                    <tr style="border-bottom: 1px solid #f8fafc;">
-                        <td style="padding: 0.875rem 0;">
-                            <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <i data-lucide="shopping-tag" size="14"></i>
-                                <span class="text-sm font-bold">${item.name}</span>
-                            </div>
-                        </td>
-                        <td style="padding: 0.875rem 0;"><span class="text-xs" style="background: var(--bg-main); padding: 2px 8px; border-radius: 4px;">${item.category}</span></td>
-                        <td style="padding: 0.875rem 0; text-align: right;">
-                            <span class="text-sm font-bold ${colorClass}">${item.kg_co2e.toFixed(2)}kg</span>
-                        </td>
-                    </tr>
-                `;
-            });
-
-            html += `
-                <div class="card" style="padding: 0; overflow: hidden;">
-                    <div style="background: var(--bg-main); padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
-                        <div>
-                            <p class="text-xs font-bold uppercase tracking-wider text-muted">Receipt Entry</p>
-                            <h3 class="text-lg" style="margin: 0;">${receipt.receipt_id}</h3>
-                        </div>
-                        <div style="text-align: right;">
-                            <p class="text-xs text-muted">Date Logged</p>
-                            <p class="text-sm font-bold">${receipt.date}</p>
-                        </div>
-                    </div>
-                    <div style="padding: 1rem 1.5rem;">
-                        <table style="width: 100%; border-collapse: collapse;">
-                            <thead>
-                                <tr style="border-bottom: 1px solid var(--border);">
-                                    <th style="text-align: left; padding: 0.75rem 0; font-size: 0.75rem; text-transform: uppercase;" class="text-muted">Item Description</th>
-                                    <th style="text-align: left; padding: 0.75rem 0; font-size: 0.75rem; text-transform: uppercase;" class="text-muted">Category</th>
-                                    <th style="text-align: right; padding: 0.75rem 0; font-size: 0.75rem; text-transform: uppercase;" class="text-muted">Footprint</th>
-                                </tr>
-                            </thead>
-                            <tbody>${rowsHtml}</tbody>
-                            <tfoot>
-                                <tr>
-                                    <td colspan="2" style="padding-top: 1rem; text-align: right; font-size: 0.875rem;" class="text-muted">Receipt Total:</td>
-                                    <td style="padding-top: 1rem; text-align: right; font-size: 0.875rem; font-weight: 700;">${receipt.total_co2}kg CO2e</td>
-                                </tr>
-                            </tfoot>
-                        </table>
-                    </div>
-                </div>
-            `;
-        });
-        container.innerHTML = html;
-        if (window.lucide) window.lucide.createIcons();
-    } catch (err) {
-        console.error("History refresh error:", err);
+    historyState.dirty = true;
+    historyState.receipts = [];
+    historyState.page = 0;
+    const hist = document.getElementById('view-history');
+    if (hist && hist.classList.contains('active')) {
+        await loadHistoryPage(1, true);
     }
 }
 
-// Event Listeners for Nav
+function renderHistorySwapCards(swaps) {
+    if (!swaps || !swaps.length) return '';
+    return swaps
+        .map((sw) => {
+            const brand = sw.recommended_brand
+                ? `${escapeHtml(sw.recommended_brand)} `
+                : '';
+            const aisleRow = sw.aisle_location
+                ? `<p class="text-xs text-muted mt-2" style="opacity: 0.75;">${escapeHtml(
+                      sw.aisle_location
+                  )}</p>`
+                : '';
+            const sid = sw.swap_id != null ? String(sw.swap_id) : '';
+            const accepted = sw.accepted ? ' is-accepted' : '';
+            const disabled = sw.accepted ? ' disabled' : '';
+            const btnLabel = sw.accepted ? 'Accepted' : 'Accept Swap';
+            return `
+                <div class="card swap-rec-card history-detail-swap-card${sw.accepted ? ' swap-rec-card--accepted' : ''}" style="margin-top: 0.75rem; padding: 1rem; border-left: 3px solid var(--green-impact);">
+                    <p class="text-sm font-bold" style="margin-bottom: 0.35rem;">
+                        Swap <span class="text-muted font-normal">${escapeHtml(sw.original_product)}</span>
+                        → <span>${brand}${escapeHtml(sw.recommended_product)}</span>
+                    </p>
+                    <p class="text-sm" style="color: var(--green-impact); font-weight: 700; margin-bottom: 0.35rem;">
+                        Save ~${Number(sw.co2_savings).toFixed(2)} kg CO2e
+                    </p>
+                    <p class="text-xs text-muted" style="line-height: 1.45;">${escapeHtml(sw.reason)}</p>
+                    ${aisleRow}
+                    <button type="button" class="btn btn-primary btn-sm mt-3 js-accept-swap${accepted}" data-swap-id="${escapeAttr(
+                sid
+            )}"${disabled}>${btnLabel}</button>
+                </div>`;
+        })
+        .join('');
+}
+
+function renderHistoryDetailHtml(data, card) {
+    const rows = (data.items || [])
+        .map((it) => {
+            const slug = categorySlug(it.category);
+            const co2c = historyItemCo2Class(it.kg_co2e);
+            const brand = it.brand ? escapeHtml(it.brand) : '—';
+            return `<tr class="history-detail-row">
+                <td><span class="text-sm font-bold">${escapeHtml(it.item_name)}</span></td>
+                <td>${brand}</td>
+                <td><span class="category-chip category-chip--${slug}">${escapeHtml(it.category)}</span></td>
+                <td class="history-detail-qty">${Number(it.quantity).toFixed(
+                    Number(it.quantity) % 1 ? 2 : 0
+                )} ${escapeHtml(it.unit || '')}</td>
+                <td class="history-detail-co2 text-sm font-bold ${co2c}">${Number(it.kg_co2e).toFixed(
+                2
+            )} kg</td>
+            </tr>`;
+        })
+        .join('');
+
+    const mobileCards = (data.items || [])
+        .map((it) => {
+            const slug = categorySlug(it.category);
+            const co2c = historyItemCo2Class(it.kg_co2e);
+            const brand = it.brand ? escapeHtml(it.brand) : '—';
+            const qty = Number(it.quantity).toFixed(Number(it.quantity) % 1 ? 2 : 0);
+            return `<div class="history-item-card">
+                <div class="history-item-card-top">
+                    <span class="text-sm font-bold" style="flex:1;min-width:0">${escapeHtml(it.item_name)}</span>
+                    <span class="text-sm font-bold ${co2c}">${Number(it.kg_co2e).toFixed(2)} kg</span>
+                </div>
+                <p class="history-item-card-meta">${brand} · <span class="category-chip category-chip--${slug}">${escapeHtml(
+                it.category
+            )}</span> · Qty ${qty} ${escapeHtml(it.unit || '')}</p>
+            </div>`;
+        })
+        .join('');
+
+    const swapsHtml = renderHistorySwapCards(data.swaps);
+    const hasReceipt = card.getAttribute('data-has-receipt-id') === '1';
+    const rid = card.getAttribute('data-receipt-api-id') || '';
+    const genBtn = hasReceipt
+        ? `<button type="button" class="btn btn-secondary btn-sm js-history-generate-swaps" data-receipt-id="${escapeAttr(
+              rid
+          )}">Get AI Swaps</button>`
+        : '';
+
+    const askLabel = escapeAttr(card.getAttribute('data-receipt-label') || data.receipt_label || '');
+
+    const swapsBlock =
+        swapsHtml ||
+        `<p class="text-xs text-muted history-detail-no-swaps">Looking good! Check back after your next receipt for swap ideas.</p>`;
+
+    const high = data.highest_co2_item;
+    const highLine = high
+        ? `<p class="text-xs text-muted history-highest-co2">Highest-impact line: <strong>${escapeHtml(
+              high.item_name
+          )}</strong> (${Number(high.kg_co2e).toFixed(2)} kg CO₂e)</p>`
+        : '';
+
+    return `
+        <div class="history-detail-inner">
+            ${highLine}
+            <div class="history-detail-cards-mobile">${mobileCards}</div>
+            <div class="history-detail-table-wrap history-detail-table-desktop">
+                <table class="history-detail-table">
+                    <thead>
+                        <tr>
+                            <th>Item</th>
+                            <th>Brand</th>
+                            <th>Category</th>
+                            <th>Qty</th>
+                            <th>CO₂e</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div class="history-detail-actions">
+                <button type="button" class="btn btn-primary btn-sm js-history-ask-ai" data-receipt-label="${askLabel}">Ask AI about this receipt</button>
+                ${genBtn}
+            </div>
+            <div class="history-detail-swaps">
+                <p class="text-xs font-bold uppercase tracking-wider text-muted mb-2">Swaps</p>
+                ${swapsBlock}
+            </div>
+        </div>`;
+}
+
+async function loadHistoryReceiptDetail(card, receiptKey) {
+    const inner = card.querySelector('.history-card-expand-inner');
+    if (!inner) return;
+    inner.innerHTML = '<p class="text-sm text-muted history-detail-loading">Loading details…</p>';
+    inner.setAttribute('data-detail-loaded', '0');
+    try {
+        const res = await fetch('/api/history/' + encodeURIComponent(receiptKey));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load receipt');
+        inner.innerHTML = renderHistoryDetailHtml(data, card);
+        inner.setAttribute('data-detail-loaded', '1');
+        if (window.lucide) window.lucide.createIcons();
+    } catch (e) {
+        console.error(e);
+        inner.innerHTML = `<p class="text-sm" style="color:var(--accent)">${escapeHtml(
+            e.message || 'Error'
+        )}</p>`;
+    }
+}
+
+async function toggleHistoryReceiptCard(card) {
+    const inner = card.querySelector('.history-card-expand-inner');
+    const header = card.querySelector('.history-card-header');
+    const key = card.getAttribute('data-receipt-key');
+    if (!inner || !key) return;
+    const open = card.classList.contains('is-expanded');
+    if (open) {
+        card.classList.remove('is-expanded');
+        if (header) header.setAttribute('aria-expanded', 'false');
+        return;
+    }
+    card.classList.add('is-expanded');
+    if (header) header.setAttribute('aria-expanded', 'true');
+    if (inner.getAttribute('data-detail-loaded') === '1') return;
+    await loadHistoryReceiptDetail(card, key);
+}
+
+async function runHistoryGenerateSwaps(btn) {
+    const rid = btn.getAttribute('data-receipt-id');
+    if (!rid) return;
+    const card = btn.closest('.history-receipt-card');
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = 'Generating…';
+    try {
+        const res = await fetch('/api/generate-swaps', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ receipt_id: rid }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Could not generate swaps');
+        const nSwaps = (data.swaps || []).length;
+        if (card) {
+            const key = card.getAttribute('data-receipt-key');
+            if (key) await loadHistoryReceiptDetail(card, key);
+            card.classList.add('is-expanded');
+        }
+        if (nSwaps > 0) showToast('Swap recommendation ready!', 'success');
+    } catch (e) {
+        showToast(e.message || 'Could not generate swaps', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+    }
+}
+
+function runLeaderboardCountUps(root) {
+    if (!root) return;
+    root.querySelectorAll('[data-lb-target]').forEach((el) => {
+        const tgt = parseFloat(el.getAttribute('data-lb-target'));
+        const dec = parseInt(el.getAttribute('data-lb-decimals') || '0', 10);
+        const suf = el.getAttribute('data-lb-suffix') || '';
+        animateStatCountUp(el, tgt, dec, suf);
+    });
+}
+
+function leaderboardRankPillClass(rank) {
+    const r = Number(rank) || 0;
+    if (r <= 5) return 'rank-pill rank-pill--top';
+    if (r <= 10) return 'rank-pill rank-pill--mid';
+    return 'rank-pill rank-pill--rest';
+}
+
+function renderPodiumCard(entry, podiumClass, medalEmoji, delayMs) {
+    if (!entry) {
+        return `<div class="podium-card podium-card--empty ${podiumClass} podium-animate" style="animation-delay:${delayMs}ms" aria-hidden="true"></div>`;
+    }
+    const streak =
+        Number(entry.streak_count) > 0
+            ? `<span class="podium-streak">🔥 ${entry.streak_count} day streak</span>`
+            : '<span class="podium-streak podium-streak--muted">No streak yet</span>';
+    const crown = podiumClass === 'podium-1' ? '<div class="podium-crown" aria-hidden="true">👑</div>' : '';
+    return `
+        <div class="podium-card ${podiumClass} podium-animate" style="animation-delay:${delayMs}ms">
+            ${crown}
+            <div class="podium-medal" aria-hidden="true">${medalEmoji}</div>
+            <div class="podium-rank-label">#${entry.rank}</div>
+            <h4 class="podium-name">${escapeHtml(entry.name)}</h4>
+            <p class="podium-level">${escapeHtml(entry.level)} ${escapeHtml(entry.level_emoji || '')}</p>
+            <p class="podium-metric"><span class="lb-num" data-lb-target="${Number(entry.points)}" data-lb-decimals="0">0</span> pts</p>
+            <p class="podium-metric podium-metric--co2"><span class="lb-num" data-lb-target="${Number(entry.total_co2_saved)}" data-lb-decimals="1" data-lb-suffix=" kg">0</span><span class="podium-co2-label"> CO₂ saved</span></p>
+            ${streak}
+            <p class="podium-badges"><span aria-hidden="true">⭐</span> ${Number(entry.badges_earned)} badges</p>
+        </div>`;
+}
+
+function applyLeaderboardPayload(data) {
+    const tbody = document.getElementById('leaderboard-tbody-g');
+    const podium = document.getElementById('leaderboard-podium');
+    const yourCard = document.getElementById('leaderboard-your-card');
+    const moversEl = document.getElementById('leaderboard-movers');
+    const footerEl = document.getElementById('leaderboard-community-footer');
+    if (!tbody || !podium) return;
+
+    const lb = data.leaderboard || [];
+    if (!lb.length && !data.current_user) {
+        tbody.innerHTML =
+            '<tr><td colspan="7" class="text-sm text-muted" style="padding:1.25rem">Keep scanning to climb the ranks!</td></tr>';
+        podium.innerHTML = '';
+        if (yourCard) yourCard.hidden = true;
+        if (moversEl) moversEl.innerHTML = '';
+        if (footerEl) footerEl.innerHTML = '';
+        if (window.lucide) window.lucide.createIcons();
+        return;
+    }
+
+    const byRank = (r) => lb.find((e) => e.rank === r);
+    const second = byRank(2);
+    const first = byRank(1);
+    const third = byRank(3);
+    podium.innerHTML = `
+        <div class="podium-row">
+            ${renderPodiumCard(second, 'podium-2', '🥈', 0)}
+            ${renderPodiumCard(first, 'podium-1', '🥇', 120)}
+            ${renderPodiumCard(third, 'podium-3', '🥉', 240)}
+        </div>`;
+
+    const rows = lb.filter((e) => e.rank >= 4);
+    tbody.innerHTML = rows
+        .map((e, idx) => {
+            const you = e.is_current_user ? ' leaderboard-row--you' : '';
+            const streakCell =
+                Number(e.streak_count) > 0
+                    ? `🔥 ${e.streak_count}`
+                    : '<span class="text-muted">—</span>';
+            const lvl = `${escapeHtml(e.level)} ${escapeHtml(e.level_emoji || '')}`;
+            return `<tr class="leaderboard-row-g lb-row-stagger${you}" style="--i:${idx}">
+                <td><span class="${leaderboardRankPillClass(e.rank)}">${e.rank}</span></td>
+                <td class="lb-name">${escapeHtml(e.name)}</td>
+                <td>${lvl}</td>
+                <td><span class="lb-num" data-lb-target="${Number(e.points)}" data-lb-decimals="0">0</span></td>
+                <td><span class="lb-num" data-lb-target="${Number(e.total_co2_saved)}" data-lb-decimals="1" data-lb-suffix=" kg">0</span></td>
+                <td>${streakCell}</td>
+                <td><span aria-hidden="true">⭐</span> ${e.badges_earned}</td>
+            </tr>`;
+        })
+        .join('');
+
+    const cu = data.current_user;
+    if (yourCard && cu) {
+        if (cu.rank > 3) {
+            yourCard.hidden = false;
+            const nextName = cu.next_rank_name
+                ? escapeHtml(cu.next_rank_name)
+                : 'the next rank';
+            const ptsGap = Number(cu.points_to_next_rank) || 0;
+            const pct = Math.min(100, Math.max(0, Number(cu.progress_to_next_pct) || 0));
+            yourCard.innerHTML = `
+                <div class="leaderboard-your-card-inner">
+                    <p class="leaderboard-your-title">You're ranked <strong>#${cu.rank}</strong> — ${escapeHtml(cu.percentile)}! 🎯</p>
+                    <p class="leaderboard-your-sub">${ptsGap} more points to overtake <strong>${nextName}</strong></p>
+                    <div class="leaderboard-your-progress-track" aria-hidden="true">
+                        <div class="leaderboard-your-progress-fill" style="width:${pct}%"></div>
+                    </div>
+                    <p class="leaderboard-your-hint text-xs text-muted">Keep scanning receipts to climb! 📸</p>
+                </div>`;
+        } else {
+            yourCard.hidden = true;
+            yourCard.innerHTML = '';
+        }
+    }
+
+    if (moversEl) {
+        const movers = data.weekly_movers || [];
+        if (movers.length) {
+            const rowsM = movers
+                .map((m) => {
+                    const up = m.direction === 'up';
+                    const icon = up ? 'trending-up' : 'trending-down';
+                    const cls = up ? 'mover-up' : 'mover-down';
+                    const arrow = up ? '↑' : '↓';
+                    return `<div class="leaderboard-mover-row ${cls}">
+                        <i data-lucide="${icon}"></i>
+                        <div>
+                            <p class="mover-name">${escapeHtml(m.name)}</p>
+                            <p class="mover-delta">${arrow} ${m.positions} spot${m.positions === 1 ? '' : 's'}</p>
+                        </div>
+                    </div>`;
+                })
+                .join('');
+            moversEl.innerHTML = `<h4 class="movers-heading">Biggest movers this week</h4>${rowsM}`;
+        } else {
+            moversEl.innerHTML = '';
+        }
+    }
+
+    if (footerEl && data.community_stats) {
+        const s = data.community_stats;
+        footerEl.innerHTML = `
+            <div class="leaderboard-footer-stats">
+                <p>🌍 Community impact: <strong>${Number(s.total_co2_saved_all).toFixed(1)} kg</strong> CO₂ saved together</p>
+                <p>📸 <strong>${s.receipts_scanned_week}</strong> receipts scanned this week</p>
+                <p>🔥 Longest active streak: <strong>${s.longest_streak_days}</strong> days by ${escapeHtml(s.longest_streak_name)}</p>
+            </div>`;
+    }
+
+    const root = document.getElementById('leaderboard-content');
+    requestAnimationFrame(() => runLeaderboardCountUps(root));
+    if (window.lucide) window.lucide.createIcons();
+}
+
+async function loadLeaderboard() {
+    const loading = document.getElementById('leaderboard-loading');
+    const sk = document.getElementById('leaderboard-skeleton');
+    const content = document.getElementById('leaderboard-content');
+    const tbody = document.getElementById('leaderboard-tbody-g');
+    const errEl = document.getElementById('leaderboard-error');
+    if (!tbody || !content) return;
+
+    const now = Date.now();
+    if (
+        now - __leaderboardCache.at < LEADERBOARD_CACHE_TTL_MS &&
+        __leaderboardCache.payload
+    ) {
+        if (loading) loading.hidden = true;
+        if (sk) sk.hidden = true;
+        content.hidden = false;
+        if (errEl) errEl.style.display = 'none';
+        applyLeaderboardPayload(__leaderboardCache.payload);
+        return;
+    }
+
+    if (loading) loading.hidden = false;
+    if (sk) sk.hidden = false;
+    content.hidden = true;
+    if (errEl) {
+        errEl.style.display = 'none';
+        errEl.textContent = '';
+    }
+    try {
+        const res = await fetch('/api/leaderboard');
+        let data;
+        try {
+            data = await res.json();
+        } catch (pe) {
+            throw new Error('Invalid leaderboard response');
+        }
+        if (!res.ok) throw new Error(data.error || 'Failed to load leaderboard');
+        __leaderboardCache = { at: Date.now(), payload: data };
+        if (loading) loading.hidden = true;
+        if (sk) sk.hidden = true;
+        content.hidden = false;
+        applyLeaderboardPayload(data);
+    } catch (err) {
+        console.error(err);
+        if (loading) loading.hidden = true;
+        if (sk) sk.hidden = true;
+        content.hidden = true;
+        showToast(err.message || 'Could not load leaderboard', 'error');
+        if (errEl) {
+            errEl.style.display = 'block';
+            errEl.textContent = err.message || 'Could not load leaderboard.';
+        }
+    }
+}
+
+async function loadBadges() {
+    const grid = document.getElementById('badges-grid');
+    if (!grid) return;
+    try {
+        const res = await fetch('/api/user/badges');
+        const list = await res.json();
+        if (!res.ok || !Array.isArray(list)) {
+            grid.innerHTML = '<p class="text-sm text-muted">Badges unavailable.</p>';
+            return;
+        }
+        const prevEarned = window.__prevBadgeEarned instanceof Set ? window.__prevBadgeEarned : null;
+        const hadSession = window.__badgeSessionStarted === true;
+        window.__badgeSessionStarted = true;
+        const newlyEarned = [];
+        if (hadSession && prevEarned) {
+            for (const b of list) {
+                if (b.earned && !prevEarned.has(b.name)) newlyEarned.push(b.name);
+            }
+        }
+        window.__prevBadgeEarned = new Set(list.filter((b) => b.earned).map((b) => b.name));
+
+        grid.innerHTML = list
+            .map((b) => {
+                const earned = b.earned ? ' badge-card--earned' : '';
+                const lucide = (b.lucide || 'award').replace(/[^a-z0-9-]/gi, '');
+                return `
+                <div class="badge-card${earned}" data-badge-name="${escapeAttr(b.name)}">
+                    <div class="badge-card-icon">
+                        <i data-lucide="${lucide}"></i>
+                        <span class="badge-emoji" aria-hidden="true">${escapeHtml(b.icon)}</span>
+                    </div>
+                    <p class="badge-card-name">${escapeHtml(b.name)}</p>
+                    <p class="badge-card-desc">${escapeHtml(b.description)}</p>
+                    <p class="badge-card-progress">${escapeHtml(b.progress)}</p>
+                </div>`;
+            })
+            .join('');
+        newlyEarned.forEach((name) => {
+            showToast(`New badge earned: ${name}!`, 'success');
+            grid.querySelectorAll('.badge-card').forEach((el) => {
+                if (el.getAttribute('data-badge-name') === name) el.classList.add('badge-card--burst');
+            });
+        });
+        if (window.lucide) window.lucide.createIcons();
+    } catch (e) {
+        console.error(e);
+        grid.innerHTML = '<p class="text-sm text-muted">Could not load badges.</p>';
+    }
+}
+
+// Event Listeners for Nav + dashboard swap links
 document.addEventListener('click', (e) => {
-    const navLink = e.target.closest('.nav-link');
+    const emptyCta = e.target.closest('.js-empty-cta-upload');
+    if (emptyCta) {
+        e.preventDefault();
+        switchView('log');
+        return;
+    }
+    const mTab = e.target.closest('.mobile-tab-btn[data-view]');
+    if (mTab) {
+        e.preventDefault();
+        switchView(mTab.dataset.view);
+        return;
+    }
+    const acceptBtn = e.target.closest('.js-accept-swap');
+    if (acceptBtn) {
+        e.preventDefault();
+        if (acceptBtn.disabled || acceptBtn.classList.contains('is-accepted')) return;
+        if (acceptBtn.classList.contains('is-accepting')) return;
+        const raw = acceptBtn.getAttribute('data-swap-id');
+        const swapId = parseInt(raw, 10);
+        if (!raw || Number.isNaN(swapId)) return;
+        acceptBtn.classList.add('is-accepting');
+        (async () => {
+            try {
+                const res = await fetch('/api/accept-swap', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ swap_id: swapId }),
+                });
+                const payload = await res.json();
+                if (!res.ok) {
+                    showToast(payload.error || 'Could not accept swap', 'error');
+                    return;
+                }
+                if (payload.points_awarded) showPointsFloater(payload.points_awarded);
+                await refreshDashboardData();
+                acceptBtn.disabled = true;
+                acceptBtn.classList.remove('is-accepting');
+                acceptBtn.classList.add('is-accepted');
+                acceptBtn.innerHTML =
+                    '<i data-lucide="check" class="swap-accept-icon"></i> Accepted';
+                const li = acceptBtn.closest('.dashboard-swap-li');
+                if (li) li.classList.add('dashboard-swap-li--accepted');
+                const card = acceptBtn.closest('.swap-rec-card');
+                if (card) card.classList.add('swap-rec-card--accepted');
+                if (window.lucide) window.lucide.createIcons();
+                loadBadges();
+                const histCard = acceptBtn.closest('.history-receipt-card');
+                if (histCard) {
+                    const rk = histCard.getAttribute('data-receipt-key');
+                    if (rk) loadHistoryReceiptDetail(histCard, rk);
+                }
+            } catch (err) {
+                console.error(err);
+                showToast('Network error', 'error');
+            } finally {
+                acceptBtn.classList.remove('is-accepting');
+            }
+        })();
+        return;
+    }
+    const swapBtn = e.target.closest('.js-swap-for-receipt');
+    if (swapBtn) {
+        e.preventDefault();
+        const rid = swapBtn.getAttribute('data-receipt-id');
+        if (rid) fetchSwapsForDashboard(rid);
+        return;
+    }
+    const navLink = e.target.closest('a.nav-link[data-view]');
     if (navLink) {
         e.preventDefault();
-        const view = navLink.dataset.view;
-        switchView(view);
+        switchView(navLink.dataset.view);
     }
 });
 
+const CHAT_COLLAPSED_KEY = 'ecocart_chat_collapsed';
+const CHAT_BREAKPOINT = 1200;
+
+function ensureEcoCartChatVisible() {
+    const chatSidebar = document.getElementById('right-chat-sidebar');
+    const fab = document.getElementById('chat-fab');
+    const backdrop = document.getElementById('chat-modal-backdrop');
+    if (!chatSidebar) return;
+    const mobile = window.matchMedia(`(max-width: ${CHAT_BREAKPOINT}px)`).matches;
+    if (mobile) {
+        chatSidebar.classList.add('is-mobile-open');
+        document.body.classList.add('chat-mobile-open');
+        if (backdrop) {
+            backdrop.hidden = false;
+            backdrop.classList.add('is-open');
+            backdrop.setAttribute('aria-hidden', 'false');
+        }
+        if (fab) fab.hidden = true;
+    } else {
+        sessionStorage.setItem(CHAT_COLLAPSED_KEY, '0');
+        chatSidebar.classList.remove('is-collapsed');
+        chatSidebar.classList.remove('is-mobile-open');
+        document.body.classList.remove('chat-mobile-open');
+        if (backdrop) {
+            backdrop.hidden = true;
+            backdrop.classList.remove('is-open');
+            backdrop.setAttribute('aria-hidden', 'true');
+        }
+        if (fab) fab.hidden = true;
+    }
+    if (window.lucide) window.lucide.createIcons();
+}
+
+function isChatMobileLayout() {
+    return window.matchMedia(`(max-width: ${CHAT_BREAKPOINT}px)`).matches;
+}
+
 // AI Coach Chat Logic
 function initChat() {
-    const chatInput = document.querySelector('.chat-input');
-    const sendBtn = document.querySelector('.chat-input-area .btn');
+    const chatSidebar = document.getElementById('right-chat-sidebar');
+    const chatInput = document.getElementById('chat-input-field') || document.querySelector('.chat-input');
+    const sendBtn = document.getElementById('chat-send-btn') || document.querySelector('.chat-input-area .btn');
     const scroller = document.getElementById('chat-scroller');
+    const chatMessages = document.getElementById('chat-messages');
+    const fab = document.getElementById('chat-fab');
+    const backdrop = document.getElementById('chat-modal-backdrop');
+    const collapseBtn = document.getElementById('chat-collapse-btn');
+    const mobileCloseBtn = document.getElementById('chat-mobile-close-btn');
+    const soonHint = document.querySelector('.chat-soon-hint');
 
-    if (!chatInput || !sendBtn) return;
+    if (!chatInput || !sendBtn || !scroller || !chatMessages || !chatSidebar) return;
 
-    // Enable inputs
     chatInput.disabled = false;
-    sendBtn.disabled = false;
-    document.querySelector('.chat-input-area p').style.display = 'none';
+    if (soonHint) soonHint.style.display = 'none';
+
+    let chatTypingTimer = null;
+    let chatSendReady = true;
+    function syncChatSendEnabled() {
+        const v = chatInput.value.trim();
+        sendBtn.disabled = !v || !chatSendReady;
+    }
+    function scheduleChatSendEnable() {
+        chatSendReady = false;
+        sendBtn.disabled = true;
+        clearTimeout(chatTypingTimer);
+        chatTypingTimer = setTimeout(() => {
+            chatSendReady = true;
+            syncChatSendEnabled();
+        }, 300);
+    }
+    chatInput.addEventListener('input', () => {
+        scheduleChatSendEnable();
+    });
+    syncChatSendEnabled();
+
+    function scrollChatToBottom() {
+        scroller.scrollTop = scroller.scrollHeight;
+    }
+
+    function appendMessage(type, text) {
+        const msg = document.createElement('div');
+        msg.className = `chat-message message-${type === 'user' ? 'user' : 'ai'}`;
+        msg.textContent = text;
+        chatMessages.appendChild(msg);
+        scrollChatToBottom();
+        return msg;
+    }
+
+    function appendTypingIndicator() {
+        const wrap = document.createElement('div');
+        wrap.className = 'chat-message message-ai chat-typing-indicator';
+        wrap.innerHTML =
+            '<span class="typing-dot" aria-hidden="true"></span><span class="typing-dot" aria-hidden="true"></span><span class="typing-dot" aria-hidden="true"></span>';
+        wrap.setAttribute('aria-label', 'Assistant is typing');
+        chatMessages.appendChild(wrap);
+        scrollChatToBottom();
+        return wrap;
+    }
+
+    function applyChatLayout() {
+        const mobile = isChatMobileLayout();
+        chatSidebar.classList.toggle('is-mobile-layout', mobile);
+        if (mobile) {
+            chatSidebar.classList.remove('is-collapsed');
+            const open = chatSidebar.classList.contains('is-mobile-open');
+            if (backdrop) {
+                backdrop.hidden = !open;
+                backdrop.classList.toggle('is-open', open);
+                backdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
+            }
+            if (fab) fab.hidden = open;
+        } else {
+            chatSidebar.classList.remove('is-mobile-open');
+            if (backdrop) {
+                backdrop.hidden = true;
+                backdrop.classList.remove('is-open');
+                backdrop.setAttribute('aria-hidden', 'true');
+            }
+            const collapsed = sessionStorage.getItem(CHAT_COLLAPSED_KEY) === '1';
+            chatSidebar.classList.toggle('is-collapsed', collapsed);
+            if (fab) fab.hidden = !collapsed;
+        }
+        if (window.lucide) window.lucide.createIcons();
+    }
+
+    function setDesktopCollapsed(collapsed) {
+        if (isChatMobileLayout()) return;
+        sessionStorage.setItem(CHAT_COLLAPSED_KEY, collapsed ? '1' : '0');
+        applyChatLayout();
+    }
+
+    function openMobileChat() {
+        if (!isChatMobileLayout()) return;
+        chatSidebar.classList.add('is-mobile-open');
+        document.body.classList.add('chat-mobile-open');
+        applyChatLayout();
+        chatInput.focus();
+    }
+
+    function closeMobileChat() {
+        chatSidebar.classList.remove('is-mobile-open');
+        document.body.classList.remove('chat-mobile-open');
+        applyChatLayout();
+    }
+
+    window.addEventListener('resize', () => applyChatLayout());
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && chatSidebar.classList.contains('is-mobile-open')) {
+            closeMobileChat();
+        }
+    });
+    applyChatLayout();
+
+    if (fab) {
+        fab.addEventListener('click', () => {
+            if (isChatMobileLayout()) openMobileChat();
+            else {
+                sessionStorage.setItem(CHAT_COLLAPSED_KEY, '0');
+                chatSidebar.classList.remove('is-collapsed');
+                applyChatLayout();
+            }
+        });
+    }
+
+    if (collapseBtn) {
+        collapseBtn.addEventListener('click', () => {
+            if (isChatMobileLayout()) return;
+            setDesktopCollapsed(true);
+        });
+    }
+
+    if (mobileCloseBtn) {
+        mobileCloseBtn.addEventListener('click', () => closeMobileChat());
+    }
+
+    if (backdrop) {
+        backdrop.addEventListener('click', () => closeMobileChat());
+    }
+
+    async function loadChatHistory() {
+        try {
+            const response = await fetch('/api/chat-history');
+            if (response.status === 401) {
+                appendMessage(
+                    'ai',
+                    "Hi! I'm your EcoCart AI assistant. Ask me about your grocery footprint, swaps, or greener shopping."
+                );
+                return;
+            }
+            const data = await response.json();
+            if (!Array.isArray(data) || data.length === 0) {
+                appendMessage(
+                    'ai',
+                    "Hi! I'm your EcoCart AI assistant. Ask me about your grocery footprint, swaps, or greener shopping."
+                );
+                return;
+            }
+            data.forEach((row) => {
+                const role = row.role === 'user' ? 'user' : 'ai';
+                appendMessage(role, row.content || '');
+            });
+        } catch (e) {
+            console.warn('Chat history load failed', e);
+            appendMessage(
+                'ai',
+                "Hi! I'm your EcoCart AI assistant. Ask me about your grocery footprint, swaps, or greener shopping."
+            );
+        }
+    }
+
+    loadChatHistory();
 
     async function handleSend() {
         const query = chatInput.value.trim();
-        if (!query) return;
+        if (!query || !chatSendReady) return;
 
-        // Append User Message
+        let payloadQuery = query;
+        const rid = window.__chatFocusedReceiptId;
+        if (rid) {
+            payloadQuery = `Regarding my receipt ${rid}: ${query}`;
+        }
+
         appendMessage('user', query);
         chatInput.value = '';
+        syncChatSendEnabled();
 
-        // Typing indicator or state
-        const loadingMsg = appendMessage('ai', 'Thinking...');
+        const typingEl = appendTypingIndicator();
 
         try {
             const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query })
+                body: JSON.stringify({ query: payloadQuery }),
             });
-            const result = await response.json();
-            
-            loadingMsg.remove();
-            
+            let result;
+            try {
+                result = await response.json();
+            } catch (parseErr) {
+                typingEl.remove();
+                showToast('Invalid chat response', 'error');
+                appendMessage('ai', 'Something went wrong. Please try again.');
+                return;
+            }
+            typingEl.remove();
+
+            if (!response.ok) {
+                const msg = result.error || 'Chat request failed';
+                showToast(msg, 'error');
+                appendMessage('ai', msg);
+                return;
+            }
+
             if (result.response) {
                 appendMessage('ai', result.response);
+            } else if (result.error) {
+                showToast(result.error, 'error');
+                appendMessage('ai', result.error);
             } else {
-                appendMessage('ai', "I'm sorry, I'm having trouble connecting to my brain right now.");
+                appendMessage('ai', "I'm sorry, I couldn't generate a reply. Please try again.");
             }
         } catch (err) {
-            loadingMsg.remove();
-            appendMessage('ai', "Error connecting to the coach.");
+            typingEl.remove();
+            showToast('Error connecting to EcoCart AI.', 'error');
+            appendMessage('ai', 'Error connecting to EcoCart AI.');
         }
     }
 
-    function appendMessage(type, text) {
-        const msg = document.createElement('div');
-        msg.className = `chat-message message-${type}`;
-        msg.innerText = text;
-        scroller.appendChild(msg);
-        scroller.scrollTop = scroller.scrollHeight;
-        return msg;
-    }
+    sendBtn.addEventListener('click', handleSend);
+    chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            if (!chatInput.value.trim() || !chatSendReady) {
+                e.preventDefault();
+                return;
+            }
+            handleSend();
+        }
+    });
 
-    sendBtn.onclick = handleSend;
-    chatInput.onkeypress = (e) => {
-        if (e.key === 'Enter') handleSend();
-    };
+    document.querySelectorAll('.chat-suggestion-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+            const p = chip.getAttribute('data-prompt');
+            if (p) {
+                chatInput.value = p;
+                chatSendReady = true;
+                syncChatSendEnabled();
+                handleSend();
+            }
+        });
+    });
+
+    const historyContainer = document.getElementById('history-container');
+    if (historyContainer) {
+        historyContainer.addEventListener('click', (e) => {
+            const genBtn = e.target.closest('.js-history-generate-swaps');
+            if (genBtn) {
+                e.preventDefault();
+                runHistoryGenerateSwaps(genBtn);
+                return;
+            }
+            const askBtn = e.target.closest('.js-history-ask-ai');
+            if (askBtn) {
+                e.preventDefault();
+                const label = askBtn.getAttribute('data-receipt-label') || '';
+                window.__chatFocusedReceiptId = label.trim() ? label.trim() : null;
+                ensureEcoCartChatVisible();
+                chatInput.focus();
+                chatSidebar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return;
+            }
+            const hdr = e.target.closest('.history-card-header');
+            if (hdr) {
+                e.preventDefault();
+                const card = hdr.closest('.history-receipt-card');
+                if (card) toggleHistoryReceiptCard(card);
+            }
+        });
+        historyContainer.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            const hdr = e.target.closest('.history-card-header');
+            if (!hdr) return;
+            e.preventDefault();
+            const card = hdr.closest('.history-receipt-card');
+            if (card) toggleHistoryReceiptCard(card);
+        });
+    }
 }
 
 // Initial View

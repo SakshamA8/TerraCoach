@@ -2,14 +2,23 @@ from flask import Flask, redirect, url_for, session, render_template, request, j
 from authlib.integrations.flask_client import OAuth
 from dotenv import load_dotenv, find_dotenv
 import os
-from models import db, User, Activity
+import json
+import math
+from models import db, User, Activity, seed_mock_data, Swap, ChatMessage
 from urllib.parse import urlencode, quote_plus
 from werkzeug.utils import secure_filename
-from datetime import timedelta, datetime
+from datetime import datetime, timedelta
 import google.generativeai as genai
 from PIL import Image
 import uuid
-from itertools import groupby
+import random
+from collections import defaultdict
+from sqlalchemy import text
+from supermarket_layout import (
+    compute_route,
+    get_layout_dict,
+    match_activity_to_layout_product,
+)
 
 # Load environment variables
 load_dotenv(find_dotenv())
@@ -17,19 +26,61 @@ load_dotenv(find_dotenv())
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", "super-secret-key")
 
+
+def _wants_json_response():
+    if request.path.startswith("/api/"):
+        return True
+    accept = (request.headers.get("Accept") or "") + " " + (
+        request.headers.get("Content-Type") or ""
+    )
+    return "application/json" in accept
+
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    if _wants_json_response():
+        return jsonify({"error": "Not found"}), 404
+    html = (
+        "<!DOCTYPE html><html lang=en><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Not found — EcoCart AI</title></head>"
+        "<body style='font-family:system-ui,sans-serif;max-width:520px;margin:4rem auto;padding:0 1.5rem;color:#132a13'>"
+        "<h1>Page not found</h1>"
+        "<p>The page you requested does not exist.</p>"
+        "<p><a href='/'>Return to EcoCart AI</a></p></body></html>"
+    )
+    return html, 404, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.errorhandler(500)
+def handle_server_error(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Internal server error"}), 500
+    html = (
+        "<!DOCTYPE html><html lang=en><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Error — EcoCart AI</title></head>"
+        "<body style='font-family:system-ui,sans-serif;max-width:520px;margin:4rem auto;padding:0 1.5rem;color:#132a13'>"
+        "<h1>Something went wrong</h1>"
+        "<p>Please try again in a moment.</p>"
+        "<p><a href='/'>Return to EcoCart AI</a></p></body></html>"
+    )
+    return html, 500, {"Content-Type": "text/html; charset=utf-8"}
+
 # Gemini Configuration
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     print("WARNING: GEMINI_API_KEY not found in environment")
 genai.configure(api_key=api_key)
 
+model = None
 try:
     # List models to see what's available
     print("Available Gemini Models:", flush=True)
     models = genai.list_models()
     for m in models:
         print(f"- {m.name} ({m.supported_generation_methods})", flush=True)
-            
+
     # Use gemini-2.5-flash for broader compatibility
     model = genai.GenerativeModel('gemini-2.5-flash')
     print(f"Gemini model '{model.model_name}' initialized successfully", flush=True)
@@ -37,13 +88,70 @@ except Exception as e:
     print(f"Error initializing Gemini model: {e}", flush=True)
 
 # Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL", "sqlite:///terracoach.db")
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL", "sqlite:///ecocart.db")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-# Initialize database
+
+def _sqlite_table_columns(connection, table_name):
+    rows = connection.execute(text(f'PRAGMA table_info("{table_name}")')).fetchall()
+    return {row[1] for row in rows}
+
+
+def _sqlite_add_missing_columns(connection, table_name, col_defs):
+    """col_defs: list of (name, sqlite_type_fragment) e.g. ('total_co2_saved', 'REAL DEFAULT 0')"""
+    existing = _sqlite_table_columns(connection, table_name)
+    for col_name, type_sql in col_defs:
+        if col_name in existing:
+            continue
+        connection.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN {col_name} {type_sql}'))
+        existing.add(col_name)
+
+
+def ensure_sqlite_schema_matches_models():
+    """
+    create_all() does not add new columns to existing SQLite tables.
+    Apply additive ALTERs so older ecocart.db files keep working.
+    """
+    uri = app.config.get("SQLALCHEMY_DATABASE_URI") or ""
+    if not uri.startswith("sqlite:"):
+        return
+    with db.engine.begin() as conn:
+        _sqlite_add_missing_columns(
+            conn,
+            "users",
+            [
+                ("total_co2_saved", "REAL DEFAULT 0"),
+                ("streak_count", "INTEGER DEFAULT 0"),
+                ("last_active_date", "DATE"),
+                ("created_at", "DATETIME"),
+            ],
+        )
+        _sqlite_add_missing_columns(
+            conn,
+            "activities",
+            [
+                ("brand", "VARCHAR(128)"),
+                ("unit", "VARCHAR(32)"),
+                ("price", "REAL"),
+            ],
+        )
+
+
+# Initialize database. SQLite dev note: if you change columns on existing models, delete the
+# local .db file (e.g. ecocart.db or instance DB) and restart so create_all() rebuilds schema.
+# ensure_sqlite_schema_matches_models() adds missing columns in place when possible.
+print(
+    "NOTE: Delete the .db file and restart if leaderboard is empty — seed data needs a fresh database."
+)
 with app.app_context():
     db.create_all()
+    ensure_sqlite_schema_matches_models()
+    n_mock = User.query.filter(User.auth0_id.like("auth0|mock_%")).count()
+    n_users = User.query.count()
+    # Seed when there are no mock rows yet, or the DB is nearly empty (dev). seed_mock_data() is a no-op if mocks already exist.
+    if n_mock == 0 or n_users < 5:
+        seed_mock_data()
 
 # Auth0 setup
 oauth = OAuth(app)
@@ -60,6 +168,506 @@ auth0 = oauth.register(
     server_metadata_url=f'https://{os.getenv("AUTH0_DOMAIN")}/.well-known/openid-configuration'
 )
 
+_ALLOWED_CATEGORIES = (
+    "Meat",
+    "Dairy",
+    "Produce",
+    "Beverages",
+    "Grains",
+    "Snacks",
+    "Frozen",
+    "Household",
+    "Other",
+)
+
+
+def _normalize_category(raw):
+    if not raw:
+        return "Other"
+    s = str(raw).strip()
+    for c in _ALLOWED_CATEGORIES:
+        if s.lower() == c.lower():
+            return c
+    return "Other"
+
+
+def _mass_kg(quantity, unit):
+    q = float(quantity if quantity is not None else 1)
+    u = (unit or "each").lower().strip()
+    if u in ("lb", "lbs", "pound", "pounds", "#"):
+        return q / 2.205
+    if u in ("oz", "ounce", "ounces"):
+        return q / 35.274
+    if u in ("kg", "kilogram", "kilograms", "kgs"):
+        return q
+    if u in ("g", "gram", "grams"):
+        return q / 1000.0
+    return None
+
+
+def _volume_liters(quantity, unit):
+    q = float(quantity if quantity is not None else 1)
+    u = (unit or "").lower().strip()
+    if u in ("gallon", "gallons", "gal"):
+        return q * 3.785
+    if u in ("l", "liter", "litre", "liters", "litres"):
+        return q
+    if u in ("ml", "milliliter", "milliliters", "millilitre", "millilitres"):
+        return q / 1000.0
+    return None
+
+
+def estimate_co2(item_name, category, quantity, unit):
+    """
+    Fallback kg CO2e from item text, category, quantity, and unit (LCA-style factors).
+    """
+    name = f" {(item_name or '').lower()} "
+    cat = f" {(category or '').lower()} "
+    qty = float(quantity if quantity is not None else 1)
+    mass = _mass_kg(qty, unit)
+    vol = _volume_liters(qty, unit)
+
+    def per_kg(rate, default_kg_per_unit=0.35):
+        if mass is not None:
+            return rate * mass
+        return rate * default_kg_per_unit * qty
+
+    def per_l(rate, default_l_per_unit=1.0):
+        if vol is not None:
+            return rate * vol
+        return rate * default_l_per_unit * qty
+
+    if "oat milk" in name or "oatly" in name or "oat beverage" in name:
+        return per_l(0.9)
+    if "almond milk" in name or "soy milk" in name or "coconut milk" in name:
+        return per_l(0.9)
+    if "tofu" in name:
+        return per_kg(2.0, 0.4)
+    if any(k in name for k in ("beef", "steak", "burger", "ground beef", "ribeye", "brisket")):
+        return per_kg(27, 0.35)
+    if "pork" in name or "bacon" in name or "ham" in name or ("sausage" in name and "beyond" not in name):
+        return per_kg(12.1, 0.25)
+    if "chicken" in name or "poultry" in name or "turkey" in name:
+        return per_kg(6.9, 0.4)
+    if any(
+        k in name
+        for k in ("salmon", "tuna", "fish", "shrimp", "seafood", "cod", "tilapia", "halibut")
+    ):
+        return per_kg(6.0, 0.3)
+    if any(k in name for k in ("cheese", "cheddar", "mozzarella", "brie", "parmesan")):
+        return per_kg(13.5, 0.2)
+    if "egg" in name:
+        return 4.8 * 0.05 * qty
+    if (
+        "milk" in name
+        and "oat" not in name
+        and "almond" not in name
+        and "coconut" not in name
+        and "soy" not in name
+    ):
+        return per_l(3.2)
+    if "rice" in name:
+        return per_kg(2.7, 0.45)
+    if any(k in name for k in ("bread", "bagel", "tortilla", "bun", "roll")):
+        return per_kg(0.8, 0.5)
+    if "produce" in cat:
+        if any(
+            k in name
+            for k in (
+                "apple",
+                "banana",
+                "orange",
+                "berry",
+                "grape",
+                "fruit",
+                "melon",
+                "avocado",
+                "pear",
+                "peach",
+            )
+        ):
+            return per_kg(0.7, 0.25)
+        return per_kg(0.5, 0.3)
+    if any(
+        k in name
+        for k in (
+            "lettuce",
+            "spinach",
+            "carrot",
+            "broccoli",
+            "tomato",
+            "onion",
+            "pepper",
+            "cucumber",
+            "kale",
+            "celery",
+            "potato",
+        )
+    ):
+        return per_kg(0.5, 0.3)
+    if any(
+        k in name
+        for k in ("apple", "banana", "orange", "berry", "grape", "fruit", "melon", "avocado")
+    ):
+        return per_kg(0.7, 0.25)
+    if any(k in name for k in ("chip", "cracker", "cookie", "cereal", "granola")) or " bar " in name:
+        return per_kg(2.5, 0.2)
+    if "snack" in cat:
+        return 2.5 * qty
+    return 1.5 * qty
+
+
+def _coalesce_kg_co2e(gemini_val, item_name, category, quantity, unit):
+    helper = estimate_co2(item_name, category, quantity, unit)
+    try:
+        g = float(gemini_val)
+    except (TypeError, ValueError):
+        g = 0.0
+    if not math.isfinite(g) or g <= 0:
+        return max(helper, 0.01)
+    if helper <= 0:
+        return max(g, 0.01)
+    lo, hi = (g, helper) if g < helper else (helper, g)
+    if lo > 0 and hi / lo > 5:
+        return max(helper, 0.01)
+    return g
+
+
+def _parse_receipt_json(text):
+    """Accept new {store_name, items} or legacy list of items."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None, []
+    if isinstance(data, list):
+        return None, data
+    if isinstance(data, dict) and "items" in data:
+        store = data.get("store_name")
+        items = data.get("items") or []
+        if not isinstance(items, list):
+            items = []
+        return store, items
+    return None, []
+
+
+def _normalize_parsed_item(raw):
+    if not isinstance(raw, dict):
+        return None
+    qty = raw.get("quantity", 1)
+    try:
+        qty = float(qty)
+    except (TypeError, ValueError):
+        qty = 1.0
+    price = raw.get("price")
+    try:
+        price = float(price) if price is not None else None
+    except (TypeError, ValueError):
+        price = None
+    return {
+        "item_name": (raw.get("item_name") or "Unknown Item").strip() or "Unknown Item",
+        "brand": raw.get("brand"),
+        "category": _normalize_category(raw.get("category")),
+        "quantity": qty,
+        "unit": (raw.get("unit") or "each") or "each",
+        "price": price,
+        "kg_co2e": raw.get("kg_co2e", 0),
+    }
+
+
+def _find_activity_for_swap(activities, original_product):
+    op = (original_product or "").strip().lower()
+    if not op:
+        return None
+    for a in activities:
+        if a.item_name and a.item_name.strip().lower() == op:
+            return a
+    for a in activities:
+        iname = (a.item_name or "").strip().lower()
+        if iname and (op in iname or iname in op):
+            return a
+    return None
+
+
+def _weekly_trend(user_id):
+    """Last four 7-day buckets (oldest first), UTC, for charting."""
+    today = datetime.utcnow().date()
+    weeks = []
+    for offset in range(3, -1, -1):
+        end_d = today - timedelta(days=offset * 7)
+        start_d = end_d - timedelta(days=6)
+        start_dt = datetime.combine(start_d, datetime.min.time())
+        end_dt = datetime.combine(end_d, datetime.max.time())
+        total = (
+            db.session.query(db.func.coalesce(db.func.sum(Activity.kg_co2e), 0.0))
+            .filter(
+                Activity.user_id == user_id,
+                Activity.timestamp >= start_dt,
+                Activity.timestamp <= end_dt,
+            )
+            .scalar()
+        )
+        total = float(total or 0)
+        if start_d.month == end_d.month:
+            label = f"{start_d.strftime('%b')} {start_d.day}–{end_d.day}"
+        else:
+            label = f"{start_d.strftime('%b %d')}–{end_d.strftime('%b %d')}"
+        weeks.append({"week_label": label, "total_co2": round(total, 2)})
+    return weeks
+
+
+def build_dashboard_stats(user):
+    """Aggregates for dashboard view and /api/stats."""
+    uid = user.id
+    total_co2 = float(
+        db.session.query(db.func.coalesce(db.func.sum(Activity.kg_co2e), 0.0))
+        .filter_by(user_id=uid)
+        .scalar()
+        or 0.0
+    )
+
+    receipts_count = (
+        db.session.query(db.func.count(db.func.distinct(Activity.receipt_id)))
+        .filter(
+            Activity.user_id == uid,
+            Activity.receipt_id.isnot(None),
+            Activity.receipt_id != "",
+        )
+        .scalar()
+        or 0
+    )
+
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    items_this_week = Activity.query.filter(
+        Activity.user_id == uid,
+        Activity.timestamp >= cutoff,
+    ).count()
+
+    cat_rows = (
+        db.session.query(Activity.category, db.func.sum(Activity.kg_co2e))
+        .filter_by(user_id=uid)
+        .group_by(Activity.category)
+        .all()
+    )
+    trends = {
+        (c if c is not None else "Other"): float(v) for c, v in cat_rows
+    }
+
+    weekly_trend = _weekly_trend(uid)
+    weekly_chart_max = max((w["total_co2"] for w in weekly_trend), default=0.01)
+    if weekly_chart_max <= 0:
+        weekly_chart_max = 0.01
+
+    top_rows = (
+        Activity.query.filter_by(user_id=uid)
+        .order_by(Activity.kg_co2e.desc())
+        .limit(3)
+        .all()
+    )
+    top_offenders = [
+        {
+            "item_name": a.item_name,
+            "brand": a.brand,
+            "category": a.category or "Other",
+            "kg_co2e": round(float(a.kg_co2e or 0), 2),
+            "receipt_id": a.receipt_id or "",
+        }
+        for a in top_rows
+    ]
+
+    swap_rows = (
+        Swap.query.join(Activity, Swap.activity_id == Activity.id)
+        .filter(Activity.user_id == uid)
+        .order_by(Swap.created_at.desc())
+        .limit(24)
+        .all()
+    )
+    user_swaps = [
+        {
+            "id": s.id,
+            "original_product": s.original_product,
+            "recommended_product": s.recommended_product,
+            "recommended_brand": s.recommended_brand,
+            "co2_savings": round(float(s.co2_savings or 0), 2),
+            "reason": s.reason,
+            "aisle_location": s.aisle_location,
+            "receipt_id": s.activity.receipt_id if s.activity else None,
+            "accepted": bool(s.accepted),
+        }
+        for s in swap_rows
+    ]
+
+    recent_activities = (
+        Activity.query.filter_by(user_id=uid)
+        .order_by(Activity.timestamp.desc())
+        .limit(5)
+        .all()
+    )
+    recent_list = [
+        {
+            "item_name": a.item_name,
+            "brand": a.brand,
+            "category": a.category or "General",
+            "kg_co2e": float(a.kg_co2e or 0),
+        }
+        for a in recent_activities
+    ]
+
+    return {
+        "total_co2": round(float(total_co2), 2),
+        "total_co2_saved": round(float(user.total_co2_saved or 0), 2),
+        "receipts_count": int(receipts_count),
+        "items_this_week": int(items_this_week),
+        "weekly_trend": weekly_trend,
+        "weekly_chart_max": weekly_chart_max,
+        "top_offenders": top_offenders,
+        "user_swaps": user_swaps,
+        "trends": trends,
+        "recent_activities": recent_list,
+        "points": int(user.points or 0),
+        "streak_count": int(user.streak_count or 0),
+    }
+
+
+def level_name_from_points(points):
+    p = int(points or 0)
+    if p >= 1900:
+        return "Guardian"
+    if p <= 100:
+        return "Seedling"
+    if p <= 500:
+        return "Sprout"
+    if p <= 1000:
+        return "Sapling"
+    return "Evergreen"
+
+
+_LEVEL_EMOJI = {
+    "Seedling": "🌱",
+    "Sprout": "🌿",
+    "Sapling": "🪴",
+    "Evergreen": "🌲",
+    "Guardian": "🌳",
+}
+
+
+def count_badges_earned_for_user(user):
+    """Count earned badges using the same rules as GET /api/user/badges."""
+    uid = user.id
+    has_receipt_activity = (
+        Activity.query.filter(
+            Activity.user_id == uid,
+            Activity.receipt_id.isnot(None),
+            Activity.receipt_id != "",
+        ).first()
+        is not None
+    )
+    n_receipts = (
+        db.session.query(db.func.count(db.func.distinct(Activity.receipt_id)))
+        .filter(
+            Activity.user_id == uid,
+            Activity.receipt_id.isnot(None),
+            Activity.receipt_id != "",
+        )
+        .scalar()
+        or 0
+    )
+    n_accepted = (
+        Swap.query.join(Activity, Swap.activity_id == Activity.id)
+        .filter(Activity.user_id == uid, Swap.accepted == True)  # noqa: E712
+        .count()
+    )
+    streak = int(user.streak_count or 0)
+    saved = float(user.total_co2_saved or 0)
+    n = 0
+    if has_receipt_activity:
+        n += 1
+    if n_receipts >= 10:
+        n += 1
+    if n_accepted >= 5:
+        n += 1
+    if streak >= 7:
+        n += 1
+    if saved >= 50:
+        n += 1
+    if saved >= 100:
+        n += 1
+    if n_receipts >= 25:
+        n += 1
+    return n
+
+
+def level_display_with_emoji(points):
+    n = level_name_from_points(points)
+    return f"{n} {_LEVEL_EMOJI.get(n, '')}".strip()
+
+
+def co2_saved_milestone_crossings(old_saved, new_saved):
+    o = float(old_saved or 0)
+    n = float(new_saved or 0)
+    if n <= o:
+        return 0
+    return max(0, int(n // 10) - int(o // 10))
+
+
+def award_points(user, action, metadata=None):
+    """
+    Apply point deltas for gamification. Mutates user.points. Does not commit.
+    Returns (points_awarded_this_action, new_points_total).
+    """
+    md = metadata or {}
+    amount = 0
+    if action == "receipt_upload":
+        amount = 50
+    elif action == "receipt_items":
+        amount = 5 * max(0, int(md.get("count", 0)))
+    elif action == "accept_swap":
+        amount = 25
+    elif action == "daily_streak":
+        streak_n = max(0, int(md.get("streak_count", user.streak_count or 0)))
+        amount = min(10 * streak_n, 100)
+    elif action == "co2_milestone":
+        amount = 100 * max(0, int(md.get("crossings", 0)))
+    cur = int(user.points or 0)
+    user.points = cur + amount
+    return amount, user.points
+
+
+def apply_daily_streak_on_page_visit(user):
+    """
+    Run on GET / for logged-in users. Updates streak_count / last_active_date (UTC) and awards streak points when the calendar day advances.
+    """
+    today = datetime.utcnow().date()
+    yesterday = today - timedelta(days=1)
+    lad = user.last_active_date
+
+    if lad is None:
+        user.streak_count = 1
+        user.last_active_date = today
+        award_points(user, "daily_streak", {"streak_count": 1})
+    elif lad == today:
+        return
+    elif lad == yesterday:
+        user.streak_count = int(user.streak_count or 0) + 1
+        user.last_active_date = today
+        award_points(user, "daily_streak", {"streak_count": user.streak_count})
+    else:
+        user.streak_count = 1
+        user.last_active_date = today
+        award_points(user, "daily_streak", {"streak_count": 1})
+
+
+def user_snapshot_for_api(user):
+    dash = build_dashboard_stats(user)
+    return {
+        "points": dash["points"],
+        "streak_count": dash["streak_count"],
+        "total_co2_saved": dash["total_co2_saved"],
+        "total_co2": dash["total_co2"],
+        "receipts_count": dash["receipts_count"],
+        "level_name": level_name_from_points(dash["points"]),
+    }
+
+
 # Routes
 @app.route('/')
 def index():
@@ -75,17 +683,20 @@ def index():
             )
             db.session.add(user)
             db.session.commit()
-        
-        # Fetch Stats
-        total_co2 = db.session.query(db.func.sum(Activity.kg_co2e)).filter_by(user_id=user.id).scalar() or 0.0
-        
-        # Recent Activities
-        recent_activities = Activity.query.filter_by(user_id=user.id).order_by(Activity.timestamp.desc()).limit(5).all()
-        
-        # Simple Habits/Trends Logic
-        # (Compare this week vs last week or just show current distribution)
-        categories = db.session.query(Activity.category, db.func.sum(Activity.kg_co2e)).filter_by(user_id=user.id).group_by(Activity.category).all()
-        trends = {cat: float(val) for cat, val in categories}
+
+        apply_daily_streak_on_page_visit(user)
+        db.session.commit()
+        db.session.refresh(user)
+
+        dash = build_dashboard_stats(user)
+        total_co2 = dash["total_co2"]
+        trends = dash["trends"]
+        recent_activities = (
+            Activity.query.filter_by(user_id=user.id)
+            .order_by(Activity.timestamp.desc())
+            .limit(5)
+            .all()
+        )
         
         # AI Insights (Dynamic-ish)
         insights = []
@@ -114,26 +725,37 @@ def index():
                 })
         else:
             insights.append({
-                "title": "Welcome to TerraCoach!",
+                "title": "Welcome to EcoCart AI!",
                 "text": "Start by uploading a receipt or logging an activity to see your impact.",
                 "saving": "Get started",
                 "difficulty": "EASY"
             })
 
-        return render_template('index.html', 
-                             user=user_info, 
-                             local_user=user, 
-                             total_co2=round(total_co2, 2),
-                             recent_activities=recent_activities,
-                             all_activities=Activity.query.filter_by(user_id=user.id).order_by(Activity.timestamp.desc()).all(),
-                             trends=trends,
-                             insights=insights)
+        return render_template(
+            "index.html",
+            user=user_info,
+            local_user=user,
+            sidebar_level_display=level_display_with_emoji(user.points),
+            total_co2=total_co2,
+            total_co2_saved=dash["total_co2_saved"],
+            receipts_count=dash["receipts_count"],
+            items_this_week=dash["items_this_week"],
+            weekly_trend=dash["weekly_trend"],
+            weekly_chart_max=dash["weekly_chart_max"],
+            top_offenders=dash["top_offenders"],
+            user_swaps=dash["user_swaps"],
+            dashboard_stats=dash,
+            recent_activities=recent_activities,
+            trends=trends,
+            insights=insights,
+        )
     
     return render_template('login.html')
 
 @app.route('/login')
 def login():
-    return auth0.authorize_redirect(redirect_uri=url_for('callback', _external=True))
+    redirect_uri = os.getenv("AUTH0_REDIRECT_URI") or url_for("callback", _external=True)
+    return auth0.authorize_redirect(redirect_uri=redirect_uri)
 
 @app.route('/callback')
 def callback():
@@ -173,80 +795,468 @@ def get_stats():
     user_info = session.get('user')
     if not user_info:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     user = User.query.filter_by(auth0_id=user_info['sub']).one()
-    
-    # Simple aggregation logic
-    total_co2 = db.session.query(db.func.sum(Activity.kg_co2e)).filter_by(user_id=user.id).scalar() or 0.0
-    
-    # Mock some trends for now vs last week
-    trends = {
-        "Red Meat": -24,
-        "Car Usage": -12,
-        "Walking": 30
+    dash = build_dashboard_stats(user)
+    dash["name"] = user.name or user_info.get("name")
+    return jsonify(dash)
+
+@app.route("/api/accept-swap", methods=["POST"])
+def accept_swap():
+    user_info = session.get("user")
+    if not user_info:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    raw_id = body.get("swap_id")
+    try:
+        swap_id = int(raw_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "swap_id required"}), 400
+
+    user = User.query.filter_by(auth0_id=user_info["sub"]).one()
+    swap = Swap.query.filter_by(id=swap_id).first()
+    if not swap:
+        return jsonify({"error": "Swap not found"}), 404
+    act = swap.activity
+    if not act or act.user_id != user.id:
+        return jsonify({"error": "Forbidden"}), 403
+    if swap.accepted:
+        return jsonify({"error": "Already accepted"}), 400
+
+    old_saved = float(user.total_co2_saved or 0)
+    swap.accepted = True
+    new_saved = old_saved + float(swap.co2_savings or 0)
+    user.total_co2_saved = new_saved
+    pa_swap, _ = award_points(user, "accept_swap")
+    cross = co2_saved_milestone_crossings(old_saved, new_saved)
+    pa_mile, _ = award_points(user, "co2_milestone", {"crossings": cross})
+    db.session.commit()
+
+    snap = user_snapshot_for_api(user)
+    snap["points_awarded"] = pa_swap + pa_mile
+    return jsonify(snap)
+
+
+@app.route("/api/leaderboard")
+def api_leaderboard():
+    user_info = session.get("user")
+    if not user_info:
+        return jsonify({"error": "Unauthorized"}), 401
+    me = User.query.filter_by(auth0_id=user_info["sub"]).one()
+    all_users = User.query.order_by(User.points.desc(), User.id.asc()).all()
+    n_total = max(len(all_users), 1)
+
+    ranked = []
+    rank = 1
+    for i, u in enumerate(all_users):
+        if i > 0 and u.points < all_users[i - 1].points:
+            rank = i + 1
+        ranked.append((rank, u))
+
+    leaderboard = []
+    for r, u in ranked[:20]:
+        lvl = level_name_from_points(u.points)
+        leaderboard.append(
+            {
+                "rank": r,
+                "user_id": u.id,
+                "name": u.name or u.email or "Explorer",
+                "points": int(u.points or 0),
+                "level": lvl,
+                "level_emoji": _LEVEL_EMOJI.get(lvl, ""),
+                "total_co2_saved": round(float(u.total_co2_saved or 0), 2),
+                "streak_count": int(u.streak_count or 0),
+                "badges_earned": count_badges_earned_for_user(u),
+                "is_current_user": u.id == me.id,
+            }
+        )
+
+    me_rank = 1
+    me_idx = 0
+    for i, (r, u) in enumerate(ranked):
+        if u.id == me.id:
+            me_rank = r
+            me_idx = i
+            break
+
+    above = ranked[me_idx - 1][1] if me_idx > 0 else None
+    top_pct = max(1, min(99, math.ceil(100 * me_rank / n_total)))
+    percentile = f"top {top_pct}%"
+
+    if me_rank <= 1 or above is None:
+        next_rank_name = None
+        points_to_next_rank = 0
+        progress_to_next_pct = 100
+    else:
+        next_rank_name = above.name or above.email or "Explorer"
+        ap = int(above.points or 0)
+        mp = int(me.points or 0)
+        points_to_next_rank = max(0, ap - mp)
+        progress_to_next_pct = (
+            int(round(100 * mp / ap)) if ap > 0 else 0
+        )
+
+    current_user = {
+        "rank": me_rank,
+        "name": me.name or me.email or "Explorer",
+        "points": int(me.points or 0),
+        "percentile": percentile,
+        "next_rank_name": next_rank_name,
+        "points_to_next_rank": points_to_next_rank,
+        "user_id": me.id,
+        "progress_to_next_pct": progress_to_next_pct,
     }
-    
-    recent_activities = Activity.query.filter_by(user_id=user.id).order_by(Activity.timestamp.desc()).limit(5).all()
-    recent_list = [{"item_name": a.item_name, "kg_co2e": a.kg_co2e} for a in recent_activities]
-    
-    return jsonify({
-        "total_co2": round(total_co2, 2),
-        "points": user.points,
-        "trends": trends,
-        "name": user.name or user_info.get('name'),
-        "recent_activities": recent_list
-    })
+
+    name_pool = [
+        (u.name or u.email or "Explorer") for _, u in ranked[:20] if (u.name or u.email)
+    ]
+    random.shuffle(name_pool)
+    weekly_movers = []
+    for i in range(min(3, len(name_pool))):
+        weekly_movers.append(
+            {
+                "name": name_pool[i],
+                "direction": "up" if random.random() > 0.35 else "down",
+                "positions": random.randint(1, 4),
+            }
+        )
+
+    total_saved_all = sum(float(u.total_co2_saved or 0) for u in all_users)
+    streak_leader = max(all_users, key=lambda u: int(u.streak_count or 0))
+    community_stats = {
+        "total_co2_saved_all": round(total_saved_all, 2),
+        "receipts_scanned_week": 347,
+        "longest_streak_days": int(streak_leader.streak_count or 0),
+        "longest_streak_name": streak_leader.name
+        or streak_leader.email
+        or "Explorer",
+    }
+
+    return jsonify(
+        {
+            "leaderboard": leaderboard,
+            "current_user": current_user,
+            "weekly_movers": weekly_movers,
+            "community_stats": community_stats,
+        }
+    )
+
+
+@app.route("/api/user/badges")
+def api_user_badges():
+    user_info = session.get("user")
+    if not user_info:
+        return jsonify({"error": "Unauthorized"}), 401
+    user = User.query.filter_by(auth0_id=user_info["sub"]).one()
+    uid = user.id
+
+    has_receipt_activity = (
+        Activity.query.filter(
+            Activity.user_id == uid,
+            Activity.receipt_id.isnot(None),
+            Activity.receipt_id != "",
+        ).first()
+        is not None
+    )
+    n_receipts = (
+        db.session.query(db.func.count(db.func.distinct(Activity.receipt_id)))
+        .filter(
+            Activity.user_id == uid,
+            Activity.receipt_id.isnot(None),
+            Activity.receipt_id != "",
+        )
+        .scalar()
+        or 0
+    )
+    n_accepted = (
+        Swap.query.join(Activity, Swap.activity_id == Activity.id)
+        .filter(Activity.user_id == uid, Swap.accepted == True)  # noqa: E712
+        .count()
+    )
+    streak = int(user.streak_count or 0)
+    saved = float(user.total_co2_saved or 0)
+
+    def prog(cur, need):
+        return f"{min(cur, need)}/{need}"
+
+    badges = [
+        {
+            "name": "First Scan",
+            "icon": "📷",
+            "description": "Upload your first receipt.",
+            "earned": has_receipt_activity,
+            "progress": "1/1" if has_receipt_activity else "0/1",
+            "lucide": "scan-line",
+        },
+        {
+            "name": "Carbon Tracker",
+            "icon": "📊",
+            "description": "Log 10 distinct receipts.",
+            "earned": n_receipts >= 10,
+            "progress": prog(n_receipts, 10),
+            "lucide": "bar-chart-2",
+        },
+        {
+            "name": "Swap Star",
+            "icon": "⭐",
+            "description": "Accept 5 swap recommendations.",
+            "earned": n_accepted >= 5,
+            "progress": prog(n_accepted, 5),
+            "lucide": "repeat",
+        },
+        {
+            "name": "Streak Master",
+            "icon": "🔥",
+            "description": "Reach a 7-day login streak.",
+            "earned": streak >= 7,
+            "progress": prog(streak, 7),
+            "lucide": "flame",
+        },
+        {
+            "name": "Eco Warrior",
+            "icon": "🌿",
+            "description": "Save 50 kg CO2e (accepted swaps).",
+            "earned": saved >= 50,
+            "progress": f"{min(saved, 50):.0f}/50 kg",
+            "lucide": "leaf",
+        },
+        {
+            "name": "Century Saver",
+            "icon": "💯",
+            "description": "Save 100 kg CO2e (accepted swaps).",
+            "earned": saved >= 100,
+            "progress": f"{min(saved, 100):.0f}/100 kg",
+            "lucide": "trophy",
+        },
+        {
+            "name": "Upload Legend",
+            "icon": "🏆",
+            "description": "Log 25 distinct receipts.",
+            "earned": n_receipts >= 25,
+            "progress": prog(n_receipts, 25),
+            "lucide": "award",
+        },
+    ]
+    return jsonify(badges)
+
+
+@app.route("/api/supermarket/layout")
+def api_supermarket_layout():
+    return jsonify(get_layout_dict())
+
+
+@app.route("/api/supermarket/route", methods=["POST"])
+def api_supermarket_route():
+    """Plan a shopping path (JSON body; POST avoids nonstandard GET bodies)."""
+    body = request.get_json(silent=True) or {}
+    product_ids = body.get("product_ids")
+    if not product_ids or not isinstance(product_ids, list):
+        return jsonify({"error": "product_ids (array) required"}), 400
+    result = compute_route([str(x) for x in product_ids])
+    if "error" in result:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@app.route("/api/supermarket/latest-receipt-items")
+def api_supermarket_latest_receipt_items():
+    user_info = session.get("user")
+    if not user_info:
+        return jsonify({"error": "Unauthorized"}), 401
+    user = User.query.filter_by(auth0_id=user_info["sub"]).one()
+    latest = (
+        Activity.query.filter_by(user_id=user.id)
+        .order_by(Activity.timestamp.desc())
+        .first()
+    )
+    if not latest:
+        return jsonify({"items": [], "receipt_id": None})
+    rid = latest.receipt_id
+    rows = (
+        Activity.query.filter_by(user_id=user.id, receipt_id=rid)
+        .order_by(Activity.id.asc())
+        .all()
+    )
+    items = []
+    for a in rows:
+        cat = a.category or "Other"
+        mp = match_activity_to_layout_product(a.item_name or "", cat)
+        items.append(
+            {
+                "activity_id": a.id,
+                "name": a.item_name or "Item",
+                "category": cat,
+                "kg_co2e": round(float(a.kg_co2e or 0), 2),
+                "layout_product_id": mp,
+            }
+        )
+    return jsonify({"items": items, "receipt_id": rid})
+
+
+RECEIPT_KEY_MANUAL = "__manual__"
+
+
+def _receipt_group_key(receipt_id):
+    return receipt_id if receipt_id else RECEIPT_KEY_MANUAL
+
+
+def _history_activity_summary(a):
+    return {
+        "name": a.item_name or "Item",
+        "category": a.category or "General",
+        "kg_co2e": round(float(a.kg_co2e or 0), 2),
+    }
+
+
+def _history_activity_detail(a):
+    return {
+        "id": a.id,
+        "item_name": a.item_name or "Item",
+        "brand": a.brand,
+        "category": a.category or "General",
+        "quantity": float(a.quantity or 1),
+        "unit": a.unit or "each",
+        "price": a.price,
+        "kg_co2e": round(float(a.kg_co2e or 0), 2),
+        "timestamp": a.timestamp.replace(microsecond=0).isoformat() + "Z",
+    }
+
 
 @app.route('/api/history')
 def get_history():
     user_info = session.get('user')
     if not user_info:
         return jsonify({"error": "Unauthorized"}), 401
-    
-    user = User.query.filter_by(auth0_id=user_info['sub']).one()
-    activities = Activity.query.filter_by(user_id=user.id).order_by(Activity.timestamp.desc()).all()
-    
-    # Group by receipt_id
-    grouped = []
-    for r_id, items in groupby(activities, key=lambda x: x.receipt_id):
-        item_list = list(items)
-        grouped.append({
-            "receipt_id": r_id or "Manual Entry",
-            "date": item_list[0].timestamp.strftime('%B %d, %Y'),
-            "total_co2": round(sum(item.kg_co2e for item in item_list), 2),
-            "items": [{
-                "name": item.item_name,
-                "category": item.category or "General",
-                "kg_co2e": round(item.kg_co2e, 2)
-            } for item in item_list]
-        })
-    
-    return jsonify({"history": grouped})
 
-@app.route('/api/activities')
-def get_activities():
-    user_info = session.get('user')
+    user = User.query.filter_by(auth0_id=user_info['sub']).one()
+    try:
+        page = int(request.args.get("page", 1))
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, page)
+    try:
+        per_page = int(request.args.get("per_page", 20))
+    except (TypeError, ValueError):
+        per_page = 20
+    per_page = max(1, min(per_page, 100))
+
+    activities = (
+        Activity.query.filter_by(user_id=user.id)
+        .order_by(Activity.timestamp.desc())
+        .all()
+    )
+
+    by_key = defaultdict(list)
+    for a in activities:
+        by_key[_receipt_group_key(a.receipt_id)].append(a)
+
+    def latest_ts(item_list):
+        return max(x.timestamp for x in item_list)
+
+    sorted_keys = sorted(by_key.keys(), key=lambda k: latest_ts(by_key[k]), reverse=True)
+    total_receipts = len(sorted_keys)
+    if total_receipts == 0:
+        total_pages = 0
+    else:
+        total_pages = (total_receipts + per_page - 1) // per_page
+    start = (page - 1) * per_page
+    page_keys = sorted_keys[start : start + per_page]
+
+    history = []
+    for key in page_keys:
+        item_list = by_key[key]
+        newest_first = sorted(item_list, key=lambda x: x.timestamp, reverse=True)
+        date_str = newest_first[0].timestamp.strftime("%B %d, %Y")
+        total_co2 = round(sum(float(x.kg_co2e or 0) for x in item_list), 2)
+        history.append(
+            {
+                "receipt_key": key,
+                "receipt_label": "Manual Entry" if key == RECEIPT_KEY_MANUAL else key,
+                "receipt_id": None if key == RECEIPT_KEY_MANUAL else key,
+                "date": date_str,
+                "total_co2": total_co2,
+                "item_count": len(item_list),
+                "items": [_history_activity_summary(x) for x in newest_first],
+            }
+        )
+
+    return jsonify(
+        {
+            "history": history,
+            "page": page,
+            "total_pages": total_pages,
+            "total_receipts": total_receipts,
+        }
+    )
+
+
+@app.route("/api/history/<string:receipt_key>")
+def get_history_receipt_detail(receipt_key):
+    user_info = session.get("user")
     if not user_info:
         return jsonify({"error": "Unauthorized"}), 401
-    
-    user = User.query.filter_by(auth0_id=user_info['sub']).one()
-    activities = Activity.query.filter_by(user_id=user.id).order_by(Activity.timestamp.desc()).limit(1).all()
-    
-    session['user'] = {
-        'sub': 'test_user_long_name_123',
-        'name': 'Alexandrovsky-Smith-Wellington-The-Third@extra-long-domain-name-that-definitely-overflows.com',
-        'given_name': 'Alexandrovsky-Smith-Wellington',
-        'email': 'extremely-long-email-address-for-testing-purposes@example.com'
-    }
-    
-    return jsonify([{
-        "id": a.id,
-        "type": a.type,
-        "item_name": a.item_name,
-        "kg_co2e": a.kg_co2e,
-        "category": a.category,
-        "timestamp": a.timestamp.strftime("%Y-%m-%d %H:%M")
-    } for a in activities])
+
+    user = User.query.filter_by(auth0_id=user_info["sub"]).one()
+    q = Activity.query.filter_by(user_id=user.id)
+    if receipt_key == RECEIPT_KEY_MANUAL:
+        q = q.filter(Activity.receipt_id.is_(None))
+    else:
+        q = q.filter(Activity.receipt_id == receipt_key)
+
+    acts = q.order_by(Activity.timestamp.desc()).all()
+    if not acts:
+        return jsonify({"error": "Receipt not found"}), 404
+
+    items_detail = [_history_activity_detail(a) for a in acts]
+    act_ids = [a.id for a in acts]
+    swap_rows = (
+        Swap.query.filter(Swap.activity_id.in_(act_ids))
+        .order_by(Swap.created_at.desc())
+        .all()
+    )
+    swaps_out = []
+    for s in swap_rows:
+        swaps_out.append(
+            {
+                "swap_id": s.id,
+                "activity_id": s.activity_id,
+                "original_product": s.original_product,
+                "recommended_product": s.recommended_product,
+                "recommended_brand": s.recommended_brand,
+                "co2_savings": round(float(s.co2_savings or 0), 4),
+                "reason": s.reason,
+                "aisle_location": s.aisle_location,
+                "accepted": bool(s.accepted),
+            }
+        )
+
+    breakdown = defaultdict(float)
+    for a in acts:
+        cat = a.category or "Other"
+        breakdown[cat] += float(a.kg_co2e or 0)
+    category_breakdown = {k: round(v, 2) for k, v in sorted(breakdown.items())}
+
+    top = max(acts, key=lambda x: float(x.kg_co2e or 0))
+    highest = _history_activity_detail(top)
+
+    key = receipt_key
+    label = "Manual Entry" if key == RECEIPT_KEY_MANUAL else key
+    date_str = acts[0].timestamp.strftime("%B %d, %Y")
+    total_co2 = round(sum(float(x.kg_co2e or 0) for x in acts), 2)
+
+    return jsonify(
+        {
+            "receipt_key": key,
+            "receipt_label": label,
+            "receipt_id": None if key == RECEIPT_KEY_MANUAL else key,
+            "date": date_str,
+            "total_co2": total_co2,
+            "items": items_detail,
+            "swaps": swaps_out,
+            "highest_co2_item": highest,
+            "category_breakdown": category_breakdown,
+        }
+    )
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -272,52 +1282,135 @@ def upload_file():
         try:
             img = Image.open(file_path)
             prompt = """
-            Analyze this receipt carefully line by line. Extract the main items and their quantities.
-            For each identified item, perform a realistic estimation of its carbon footprint in kg CO2e based on widely accepted Life Cycle Assessment (LCA) averages (e.g., beef ~27kg CO2e/kg, chicken ~6kg CO2e/kg, local vegetables ~0.5kg CO2e/kg, common household goods ~2-5kg CO2e per item).
-            Return a JSON list of objects representing these items exactly matching the following schema.
-            Keys to include:
-            "item_name" (string), "kg_co2e" (float - calculate accurately based on quantity and type), "category" (string: 'Food', 'Transport', 'Shopping', or 'Energy').
-            Example: [{"item_name": "Beef Steak 1lb", "kg_co2e": 12.5, "category": "Food"}]
+            Analyze this grocery receipt image carefully. Read the store name from the header if visible.
+            Extract each line item with: product name, brand (if printed), quantity, unit (lb, oz, each, gallon, kg, L, etc.), and price if shown.
+            For each item, estimate total kg CO2e for that line (quantity-adjusted) using realistic LCA-style factors.
+
+            Respond ONLY with valid JSON matching this exact structure (no markdown):
+            {
+              "store_name": "string or null",
+              "items": [
+                {
+                  "item_name": "string",
+                  "brand": "string or null",
+                  "category": "string (one of: Meat, Dairy, Produce, Beverages, Grains, Snacks, Frozen, Household, Other)",
+                  "quantity": 1,
+                  "unit": "each",
+                  "price": null,
+                  "kg_co2e": 0.0
+                }
+              ]
+            }
+            Use null for unknown brand or price. quantity must be a number (default 1). unit must be a short string.
             """
             response = model.generate_content(
                 [prompt, img],
-                generation_config={"response_mime_type": "application/json"}
+                generation_config={"response_mime_type": "application/json"},
             )
-            import json
-            
-            try:
-                analysis_results = json.loads(response.text)
-                if not isinstance(analysis_results, list):
-                    analysis_results = [analysis_results]
-            except json.JSONDecodeError as e:
-                print(f"Failed to decode JSON: {e}\nRaw response: {response.text}")
-                analysis_results = [{"item_name": "Receipt Analysis Fallback", "kg_co2e": 2.5, "category": "Shopping"}]
-            
+
+            store_name, raw_items = _parse_receipt_json(response.text)
+            if not raw_items:
+                print(f"Failed to parse receipt JSON; raw: {response.text[:500]}")
+                fb_q, fb_u = 1.0, "each"
+                analysis_results = [
+                    {
+                        "item_name": "Receipt Analysis Fallback",
+                        "brand": None,
+                        "category": "Other",
+                        "quantity": fb_q,
+                        "unit": fb_u,
+                        "price": None,
+                        "kg_co2e": round(
+                            _coalesce_kg_co2e(
+                                2.5,
+                                "Receipt Analysis Fallback",
+                                "Other",
+                                fb_q,
+                                fb_u,
+                            ),
+                            4,
+                        ),
+                    }
+                ]
+                store_name = store_name or None
+            else:
+                analysis_results = []
+                for raw in raw_items:
+                    norm = _normalize_parsed_item(raw)
+                    if not norm:
+                        continue
+                    norm["kg_co2e"] = round(
+                        _coalesce_kg_co2e(
+                            norm["kg_co2e"],
+                            norm["item_name"],
+                            norm["category"],
+                            norm["quantity"],
+                            norm["unit"],
+                        ),
+                        4,
+                    )
+                    if norm.get("brand") is not None:
+                        b = str(norm["brand"]).strip()
+                        norm["brand"] = b if b else None
+                    analysis_results.append(norm)
+                if not analysis_results:
+                    fb_q, fb_u = 1.0, "each"
+                    analysis_results = [
+                        {
+                            "item_name": "Receipt Analysis Fallback",
+                            "brand": None,
+                            "category": "Other",
+                            "quantity": fb_q,
+                            "unit": fb_u,
+                            "price": None,
+                            "kg_co2e": round(
+                                estimate_co2("unknown", "Other", fb_q, fb_u), 4
+                            ),
+                        }
+                    ]
+
             user = User.query.filter_by(auth0_id=user_info['sub']).one()
-            
-            # Generate a unique receipt ID for this batch
+
             receipt_id = f"REF-{uuid.uuid4().hex[:8].upper()}"
-            
-            # Save the analyzed activities
+
             for item in analysis_results:
+                brand = item.get("brand")
+                unit = item.get("unit") or "each"
+                price = item.get("price")
+                qty = item.get("quantity", 1.0)
                 new_activity = Activity(
-                    type='grocery',
-                    item_name=item.get('item_name', 'Unknown Item'),
-                    kg_co2e=item.get('kg_co2e', 0.0),
-                    category=item.get('category', 'Shopping'),
+                    type="grocery",
+                    item_name=item.get("item_name", "Unknown Item"),
+                    brand=brand,
+                    unit=unit[:32] if unit else None,
+                    price=price,
+                    kg_co2e=float(item.get("kg_co2e", 0) or 0),
+                    quantity=float(qty) if qty is not None else 1.0,
+                    category=item.get("category") or "Other",
                     user_id=user.id,
-                    receipt_id=receipt_id
+                    receipt_id=receipt_id,
                 )
                 db.session.add(new_activity)
-            
+
+            n_items = len(analysis_results)
+            pa_upload, _ = award_points(user, "receipt_upload")
+            pa_items, new_pts = award_points(
+                user, "receipt_items", {"count": n_items}
+            )
             db.session.commit()
-            
-            return jsonify({
-                "status": "success", 
-                "filename": unique_filename,
-                "message": "AI analysis complete",
-                "data": analysis_results
-            })
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "filename": unique_filename,
+                    "message": "AI analysis complete",
+                    "receipt_id": receipt_id,
+                    "store_name": store_name,
+                    "data": analysis_results,
+                    "points": new_pts,
+                    "points_awarded": pa_upload + pa_items,
+                }
+            )
             
         except Exception as e:
             print(f"Gemini Analysis Error: {e}")
@@ -325,47 +1418,223 @@ def upload_file():
         
     return jsonify({"error": "Invalid file type"}), 400
 
+
+@app.route("/api/generate-swaps", methods=["POST"])
+def generate_swaps():
+    user_info = session.get("user")
+    if not user_info:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    receipt_id = body.get("receipt_id")
+    if not receipt_id:
+        return jsonify({"error": "receipt_id required"}), 400
+
+    user = User.query.filter_by(auth0_id=user_info["sub"]).one()
+    activities = (
+        Activity.query.filter_by(receipt_id=receipt_id, user_id=user.id)
+        .order_by(Activity.kg_co2e.desc())
+        .all()
+    )
+    if not activities:
+        return jsonify({"error": "No items for this receipt"}), 404
+
+    lines = []
+    for a in activities:
+        lines.append(
+            f"- {a.item_name} | category={a.category or 'Other'} | {a.kg_co2e:.2f} kg CO2e | "
+            f"brand={a.brand or 'n/a'} | qty={a.quantity} {a.unit or 'each'}"
+        )
+
+    prompt = f"""Given these grocery items with their carbon footprints, suggest lower-carbon alternatives for the top 3 highest-emission items. For each suggestion include: the original product name, a specific recommended replacement product (include brand name), estimated CO2 savings in kg, a brief reason it's better, and which aisle it would typically be found in at a grocery store. Respond ONLY with valid JSON array:
+[{{ "original_product": "...", "recommended_product": "...", "recommended_brand": "...", "co2_savings": 0.0, "reason": "...", "aisle_location": "..." }}]
+
+Items on receipt:
+{chr(10).join(lines)}
+
+Use original_product strings that exactly match the item name before the pipe (|) in each line above."""
+
+    try:
+        resp = model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        swaps_raw = json.loads(resp.text)
+        if not isinstance(swaps_raw, list):
+            swaps_raw = [swaps_raw]
+    except Exception as e:
+        print(f"generate-swaps Gemini error: {e}")
+        return jsonify({"error": "Failed to generate swaps"}), 500
+
+    ids = [a.id for a in activities]
+    for aid in ids:
+        Swap.query.filter_by(activity_id=aid).delete()
+
+    created = []
+    for sw in swaps_raw:
+        if not isinstance(sw, dict):
+            continue
+        orig = sw.get("original_product")
+        act = _find_activity_for_swap(activities, orig)
+        if not act:
+            continue
+        try:
+            savings = float(sw.get("co2_savings") or 0)
+        except (TypeError, ValueError):
+            savings = 0.0
+        rec = Swap(
+            activity_id=act.id,
+            original_product=(orig or act.item_name or "").strip() or "Item",
+            recommended_product=(sw.get("recommended_product") or "Alternative").strip()
+            or "Alternative",
+            recommended_brand=(sw.get("recommended_brand") or None),
+            co2_savings=savings,
+            reason=(sw.get("reason") or "").strip() or "Lower-carbon alternative.",
+            aisle_location=(sw.get("aisle_location") or None),
+            accepted=False,
+        )
+        if rec.recommended_brand is not None:
+            rb = str(rec.recommended_brand).strip()
+            rec.recommended_brand = rb if rb else None
+        db.session.add(rec)
+        created.append(rec)
+
+    db.session.flush()
+    out = []
+    for rec in created:
+        act = rec.activity
+        out.append(
+            {
+                "swap_id": rec.id,
+                "original_product": rec.original_product,
+                "recommended_product": rec.recommended_product,
+                "recommended_brand": rec.recommended_brand,
+                "co2_savings": rec.co2_savings,
+                "reason": rec.reason,
+                "aisle_location": rec.aisle_location,
+                "activity_id": rec.activity_id,
+            }
+        )
+
+    db.session.commit()
+    return jsonify({"swaps": out})
+
+
+def _eco_level_from_points(points):
+    return level_name_from_points(points)
+
+
+@app.route("/api/chat-history", methods=["GET"])
+def chat_history():
+    user_info = session.get("user")
+    if not user_info:
+        return jsonify({"error": "Unauthorized"}), 401
+    user = User.query.filter_by(auth0_id=user_info["sub"]).one()
+    rows = (
+        ChatMessage.query.filter_by(user_id=user.id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    rows.reverse()
+    out = [
+        {
+            "role": m.role,
+            "content": m.content,
+            "created_at": m.created_at.replace(microsecond=0).isoformat() + "Z",
+        }
+        for m in rows
+    ]
+    return jsonify(out)
+
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     user_info = session.get('user')
     if not user_info:
         return jsonify({"error": "Unauthorized"}), 401
-    
-    data = request.json
+
+    if model is None:
+        return jsonify({"error": "AI model unavailable"}), 503
+
+    data = request.json or {}
     user_query = data.get('query')
     if not user_query:
         return jsonify({"error": "No query provided"}), 400
-        
+
     user = User.query.filter_by(auth0_id=user_info['sub']).one()
-    
-    # Gather User Context
+
     total_co2 = db.session.query(db.func.sum(Activity.kg_co2e)).filter_by(user_id=user.id).scalar() or 0.0
     recent_activities = Activity.query.filter_by(user_id=user.id).order_by(Activity.timestamp.desc()).limit(15).all()
-    
-    history_summary = "\n".join([f"- {a.item_name} ({a.kg_co2e}kg CO2e) in {a.category or 'General'}" for a in recent_activities])
-    
-    system_prompt = f"""
-    You are the TerraCoach AI Sustainability Coach. Your goal is to help {user.name} reduce their carbon footprint.
-    User Context:
-    - Current Total Carbon Footprint: {total_co2:.2f} kg CO2e
-    - Points Earned: {user.points}
-    - Recent Activities:
-    {history_summary}
-    
-    Be supportive, insightful, and offer practical, specific advice based on their history.
-    If they ask about an item from their history, refer to it specifically.
-    Keep your responses relatively concise (1-3 small paragraphs).
-    """
-    
+
+    cat_rows = (
+        db.session.query(Activity.category, db.func.sum(Activity.kg_co2e).label("tot"))
+        .filter(Activity.user_id == user.id)
+        .group_by(Activity.category)
+        .order_by(db.func.sum(Activity.kg_co2e).desc())
+        .limit(3)
+        .all()
+    )
+    top_cats = "\n".join(
+        f"- {(c or 'Other')}: {float(t or 0):.2f} kg CO2e total" for c, t in cat_rows
+    ) or "- No category data yet"
+
+    recent_swaps = (
+        Swap.query.join(Activity)
+        .filter(Activity.user_id == user.id)
+        .order_by(Swap.created_at.desc())
+        .limit(8)
+        .all()
+    )
+    swap_lines = []
+    for s in recent_swaps:
+        brand = f" ({s.recommended_brand})" if s.recommended_brand else ""
+        reason_snip = (s.reason or "")[:120]
+        swap_lines.append(
+            f"- {s.original_product} → {s.recommended_product}{brand}: ~{s.co2_savings:.2f} kg CO2e saved potential; {reason_snip}"
+        )
+    swaps_summary = "\n".join(swap_lines) if swap_lines else "- None generated yet"
+
+    history_summary = "\n".join(
+        [f"- {a.item_name} ({a.kg_co2e:.2f} kg CO2e) in {a.category or 'General'}" for a in recent_activities]
+    ) or "- No recent items"
+
+    level = _eco_level_from_points(user.points)
+    points = int(user.points or 0)
+
+    system_prompt = f"""You are the EcoCart AI sustainability assistant. Help {user.name or 'the user'} reduce grocery-related carbon impact using the data below.
+
+User context:
+- EcoCart level: {level} (from EcoPoints: {points})
+- Total logged footprint (sum of purchases): {total_co2:.2f} kg CO2e
+- Top categories by CO2 (lifetime):
+{top_cats}
+- Recent purchase line items (up to 15, newest first):
+{history_summary}
+- Recent swap recommendations the app has suggested (may be empty):
+{swaps_summary}
+
+Instructions: Be concise, friendly, and actionable. When recommending products, include specific brand names. If asked about carbon footprints, cite approximate kg CO2e values. Keep responses under 150 words unless the user asks for detail."""
+
     try:
-        chat_model = genai.GenerativeModel('gemini-2.5-flash')
-        response = chat_model.generate_content([system_prompt, f"User Question: {user_query}"])
-        return jsonify({"response": response.text})
+        response = model.generate_content([system_prompt, f"User question: {user_query}"])
+        try:
+            text = (response.text or "").strip()
+        except (ValueError, AttributeError):
+            text = ""
+        if not text:
+            text = "I could not generate a reply. Please try again."
     except Exception as e:
         print(f"Chat Error: {e}")
         return jsonify({"error": str(e)}), 500
 
+    db.session.add(ChatMessage(user_id=user.id, role="user", content=user_query))
+    db.session.add(ChatMessage(user_id=user.id, role="assistant", content=text))
+    db.session.commit()
+
+    return jsonify({"response": text})
+
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=1970)
 
 

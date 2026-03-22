@@ -3,19 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TerraCoach - AI Sustainability Coach</title>
-    <!-- Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <title>EcoCart AI — Grocery sustainability</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='apple-touch-icon.png') }}">
+    <meta name="description" content="EcoCart AI: AI-powered grocery sustainability — receipt analysis, carbon footprints, and greener choices.">
+    <meta property="og:title" content="EcoCart AI">
+    <meta property="og:description" content="AI-powered grocery sustainability tracker">
+    <meta property="og:type" content="website">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script src="https://unpkg.com/lucide@0.344.0"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <meta name="description" content="TerraCoach: Your AI-driven behavior change platform for a sustainable future.">
 </head>
 <body>
     <div class="app-container">
         <!-- Sidebar Navigation -->
         <aside class="sidebar">
             <div class="logo">
+                <i data-lucide="shopping-cart"></i>
                 <i data-lucide="leaf"></i>
-                <span>TerraCoach</span>
+                <span>EcoCart AI</span>
             </div>
             
             <nav class="nav-links">
@@ -28,13 +42,25 @@
                 <div class="nav-item">
                     <a href="#" class="nav-link" data-view="log">
                         <i data-lucide="camera"></i>
-                        Log Activity
+                        Upload Receipt
                     </a>
                 </div>
                 <div class="nav-item">
                     <a href="#" class="nav-link" data-view="history">
                         <i data-lucide="history"></i>
-                        Full History
+                        My History
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-view="supermarket">
+                        <i data-lucide="map-pin"></i>
+                        Supermarket 3D
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-view="leaderboard">
+                        <i data-lucide="trophy"></i>
+                        Leaderboard
                     </a>
                 </div>
             </nav>
@@ -44,11 +70,17 @@
                     <div style="width: 38px; height: 38px; background: rgba(255, 255, 255, 0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.1);">
                         <i data-lucide="user" size="20"></i>
                     </div>
-                    <div style="flex: 1;">
+                    <div style="flex: 1; min-width: 0;">
                         <p class="text-sm font-bold">{{ user.name or user.given_name or 'Explorer' }}</p>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
-                            <p class="text-xs text-muted" style="color: #a3b8a3;">{{ local_user.points or 0 }} TerraPoints</p>
-                            <a href="/logout" class="text-xs text-muted logout-link" title="Logout" style="color: #a3b8a3; transition: color 0.2s; display: inline-flex; align-items: center; margin-top: 1px;">
+                        <p class="text-xs font-bold" style="color: #ecf39e; margin-top: 4px;" id="sidebar-level-line">{{ sidebar_level_display }}</p>
+                        <p class="text-xs" style="color: #c8dcc8; margin-top: 2px;" id="sidebar-points-line">{{ local_user.points or 0 }} EcoPoints</p>
+                        <p class="text-xs" style="color: #a3b8a3; margin-top: 4px;" id="sidebar-streak-line">🔥 {{ local_user.streak_count or 0 }} day streak</p>
+                        <div class="sidebar-level-track" aria-hidden="true">
+                            <div class="sidebar-level-fill" id="sidebar-level-fill" style="width: 0%;"></div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
+                            <span class="text-xs text-muted" style="color: #a3b8a3; font-size: 0.65rem;" id="sidebar-level-caption">Next level</span>
+                            <a href="/logout" class="text-xs text-muted logout-link" title="Logout" style="color: #a3b8a3; transition: color 0.2s; display: inline-flex; align-items: center;">
                                 <i data-lucide="log-out" size="14"></i>
                             </a>
                         </div>
@@ -62,16 +94,33 @@
             <!-- Dynamic Content Injected Here -->
             <div id="view-content">
                 <!-- Dashboard View -->
-                <section id="view-dashboard" class="view-section active">
+                <section id="view-dashboard" class="view-section active"
+                    data-stat-co2="{{ total_co2 if total_co2 is defined else 0 }}"
+                    data-stat-saved="{{ total_co2_saved if total_co2_saved is defined else 0 }}"
+                    data-stat-receipts="{{ receipts_count if receipts_count is defined else 0 }}"
+                    data-user-points="{{ local_user.points or 0 }}"
+                    data-user-id="{{ local_user.id }}"
+                    data-streak-count="{{ local_user.streak_count or 0 }}">
                     <div style="margin-bottom: 2rem;">
-                        <h1 class="text-2xl" style="overflow-wrap: break-word; line-height: 1.2; margin-bottom: 0.5rem;">Good afternoon, {{ user.given_name or user.name or 'Explorer' }}!</h1>
-                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;">
+                        <h1 class="text-2xl" style="overflow-wrap: break-word; line-height: 1.3; margin-bottom: 0.35rem;">
+                            <span id="dash-greeting-word">Good afternoon</span>,
+                            <span id="dash-user-firstname">{{ user.given_name or user.name or 'Explorer' }}</span>!
+                            <span id="dash-level-pill" class="eco-level-pill"></span>
+                        </h1>
+                        <div class="dash-level-progress-wrap">
+                            <div class="dash-level-progress-track">
+                                <div class="dash-level-progress-fill" id="dash-level-progress-fill" style="width: 0%;"></div>
+                            </div>
+                            <p class="text-xs text-muted" id="dash-level-next" style="margin-top: 4px;"></p>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem;">
                             <p class="text-muted" style="flex: 1; min-width: 200px;">
-                                {% if total_co2 > 0 %}
-                                You're making great progress this week.
+                                {% if (total_co2 if total_co2 is defined else 0)|float > 0 %}
+                                You're making great progress.
                                 {% else %}
                                 Welcome! Start your journey by logging an activity.
                                 {% endif %}
+                                <span class="dash-items-week-wrap"> <strong id="dash-items-week">{{ items_this_week if items_this_week is defined else 0 }}</strong> items logged in the last 7 days.</span>
                             </p>
                             <div style="display: flex; gap: 0.75rem; flex-shrink: 0;">
                                 <button class="btn btn-outline btn-sm" onclick="alert('Sharing coming soon!')">
@@ -80,27 +129,44 @@
                                 </button>
                                 <button class="btn btn-primary btn-sm" onclick="switchView('log')">
                                     <i data-lucide="plus" size="14"></i>
-                                    Log Activity
+                                    Upload Receipt
                                 </button>
                             </div>
                         </div>
                     </div>
 
-                    <div class="grid-cols-3 mb-2" style="margin-bottom: 2rem;">
-                        <div class="card">
-                            <p class="text-xs text-muted font-bold uppercase">Carbon Footprint</p>
-                            <h2 class="text-2xl mt-4" id="stat-total-co2">{{ total_co2 or 0 }} <span class="text-sm font-normal">kg CO2e</span></h2>
-                            <p class="text-xs mt-2 text-muted">Weekly performance tracking</p>
+                    <div class="dashboard-stat-skeleton" id="dashboard-stat-skeleton" hidden>
+                        <div class="skeleton-card card"><div class="skeleton-line skeleton-line--lg"></div><div class="skeleton-line skeleton-line--md"></div></div>
+                        <div class="skeleton-card card"><div class="skeleton-line skeleton-line--lg"></div><div class="skeleton-line skeleton-line--md"></div></div>
+                        <div class="skeleton-card card"><div class="skeleton-line skeleton-line--lg"></div><div class="skeleton-line skeleton-line--sm"></div></div>
+                    </div>
+                    <div class="stats-grid grid-cols-3 mb-2 dashboard-stat-grid" id="dashboard-stat-grid" style="margin-bottom: 2rem;">
+                        <div class="card stat-card stat-card--tracked">
+                            <div style="display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px;">
+                                <i data-lucide="cloud" style="width:20px; height:20px; color:#4f772d;"></i>
+                                <span style="font-size:0.85em; color:#6b7280; font-weight:500;">Carbon Tracked</span>
+                            </div>
+                            <div class="stat-value-num" id="stat-total-co2" data-target="{{ '%.2f'|format((total_co2 if total_co2 is defined and total_co2 is not none else 0)|float) }}">{{ "%.1f"|format((total_co2 if total_co2 is defined and total_co2 is not none else 0)|float) }}</div>
+                            <div style="font-size:0.8em; color:#9ca3af;">kg CO₂e</div>
+                            <p class="text-xs mt-2 text-muted" style="text-align:center;">All-time from receipts</p>
                         </div>
-                        <div class="card">
-                            <p class="text-xs text-muted font-bold uppercase">Points Earned</p>
-                            <h2 class="text-2xl mt-4" id="stat-points">{{ local_user.points or 0 }} <span class="text-sm font-normal">TerraPoints</span></h2>
-                            <p class="text-xs mt-2 text-muted">Keep logging to earn more!</p>
+                        <div class="card stat-card stat-card--saved">
+                            <div style="display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px;">
+                                <i data-lucide="trending-down" style="width:20px; height:20px; color:#22c55e;"></i>
+                                <span style="font-size:0.85em; color:#6b7280; font-weight:500;">Carbon Saved</span>
+                            </div>
+                            <div class="stat-value-num" id="stat-co2-saved" data-target="{{ '%.2f'|format((total_co2_saved if total_co2_saved is defined and total_co2_saved is not none else 0)|float) }}">{{ "%.1f"|format((total_co2_saved if total_co2_saved is defined and total_co2_saved is not none else 0)|float) }}</div>
+                            <div style="font-size:0.8em; color:#9ca3af;">kg CO₂e</div>
+                            <p class="text-xs mt-2 text-muted" style="text-align:center;">From swaps &amp; choices</p>
                         </div>
-                        <div class="card">
-                            <p class="text-xs text-muted font-bold uppercase">Next Milestone</p>
-                            <h2 class="text-2xl mt-4" id="stat-milestone">{{ (local_user.points or 0) % 100 }}<span class="text-sm font-normal">/100</span></h2>
-                            <p class="text-xs mt-2 text-muted">Goal: "Eco-Apprentice"</p>
+                        <div class="card stat-card stat-card--receipts">
+                            <div style="display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px;">
+                                <i data-lucide="receipt" style="width:20px; height:20px; color:#f59e0b;"></i>
+                                <span style="font-size:0.85em; color:#6b7280; font-weight:500;">Receipts Scanned</span>
+                            </div>
+                            <div class="stat-value-num" id="stat-receipts" data-target="{{ receipts_count if receipts_count is defined and receipts_count is not none else 0 }}">{{ receipts_count if receipts_count is defined and receipts_count is not none else 0 }}</div>
+                            <div style="font-size:0.8em; color:#9ca3af;">receipts</div>
+                            <p class="text-xs mt-2 text-muted" style="text-align:center;">Distinct receipts</p>
                         </div>
                     </div>
 
@@ -116,23 +182,31 @@
                     </div>
                     {% endif %}
 
-                    <div class="grid-cols-2">
+                    <div class="grid-cols-2 dashboard-main-split">
                         <section>
                             <h3 class="text-lg mb-2">Recent Activities</h3>
                             <div class="card" style="padding: 0;" id="dashboard-recent-activities">
-                                {% if recent_activities %}
+                                {% if receipts_count == 0 and not recent_activities %}
+                                <div class="empty-state-card" style="padding: 1.75rem; text-align: center;">
+                                    <p class="text-sm font-bold" style="margin-bottom: 0.5rem;">Upload your first receipt to start tracking!</p>
+                                    <p class="text-xs text-muted mb-3">We will estimate carbon per item and build your habits chart.</p>
+                                    <button type="button" class="btn btn-primary btn-sm js-empty-cta-upload">Upload receipt</button>
+                                </div>
+                                {% elif recent_activities %}
                                     {% for activity in recent_activities %}
-                                    <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; border-bottom: 1px solid var(--border);">
-                                        <div style="display: flex; gap: 0.75rem; align-items: center;">
-                                            <div style="background: #f1f5f9; padding: 0.5rem; border-radius: 8px;">
+                                    {% set cat = activity.category or 'Other' %}
+                                    <div class="dash-recent-row" style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; border-bottom: 1px solid var(--border);">
+                                        <div style="display: flex; gap: 0.75rem; align-items: center; min-width: 0;">
+                                            <span class="category-dot category-dot--{{ cat|lower|replace(' ', '-') }}" title="{{ cat }}"></span>
+                                            <div style="background: #f1f5f9; padding: 0.5rem; border-radius: 8px; flex-shrink: 0;">
                                                 <i data-lucide="shopping-bag" size="18"></i>
                                             </div>
-                                            <div>
-                                                <p class="text-sm font-bold">{{ activity.item_name }}</p>
-                                                <p class="text-xs text-muted">{{ activity.category or 'General' }}</p>
+                                            <div style="min-width: 0;">
+                                                <p class="text-sm font-bold" style="overflow-wrap: break-word;">{{ activity.item_name }}</p>
+                                                <p class="text-xs text-muted">{% if activity.brand %}<span class="font-medium">{{ activity.brand }}</span> · {% endif %}{{ activity.category or 'General' }}</p>
                                             </div>
                                         </div>
-                                        <p class="text-sm font-bold {% if activity.kg_co2e > 5 %}text-high-impact{% elif activity.kg_co2e < 1.5 %}text-low-impact{% endif %}">
+                                        <p class="text-sm font-bold flex-shrink-0 {% if activity.kg_co2e > 5 %}text-high-impact{% elif activity.kg_co2e < 1.5 %}text-low-impact{% endif %}">
                                             {{ activity.kg_co2e|round(2) }}kg
                                         </p>
                                     </div>
@@ -143,31 +217,195 @@
                             </div>
                         </section>
 
-                        <section>
+                        <section class="dashboard-right-stack">
                             <h3 class="text-lg mb-2">My Habits</h3>
-                            <div class="card">
+                            <div class="card" id="dashboard-habits-card">
+                                <div class="dashboard-habits-skeleton" id="dashboard-habits-skeleton" hidden>
+                                    <div class="skeleton-line skeleton-line--full mb-3"></div>
+                                    <div class="skeleton-line skeleton-line--full mb-3"></div>
+                                    <div class="skeleton-line skeleton-line--full"></div>
+                                </div>
+                                <div id="dashboard-habits-body">
                                 {% if trends %}
                                     {% for category, amount in trends.items() %}
-                                    <div style="margin-bottom: 1rem;">
-                                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    {% set pct = [100, (amount / (total_co2 or 1) * 100)]|min %}
+                                    <div class="habit-row" data-category="{{ category }}">
+                                        <div class="habit-row-header">
                                             <p class="text-sm font-bold">{{ category }}</p>
-                                            <p class="text-xs">{{ amount|round(1) }}kg</p>
+                                            <p class="text-xs habit-kg">{{ amount|round(2) }} kg CO2e</p>
                                         </div>
-                                        <div style="height: 6px; background: #e2e8f0; border-radius: 3px;">
-                                            <div style="width: {{ [100, (amount / (total_co2 or 1) * 100)]|min }}%; height: 100%; background: var(--primary-dark); border-radius: 3px;"></div>
+                                        <div class="habit-track">
+                                            <div class="habit-fill" data-pct="{{ pct }}" style="width: 0%;"></div>
                                         </div>
                                     </div>
                                     {% endfor %}
                                 {% else %}
                                     <p class="text-sm text-muted">Upload receipts to track your habits.</p>
                                 {% endif %}
-                                <a href="#" class="btn btn-outline" style="width: 100%; text-align: center; display: block;" onclick="switchView('history')">View All History</a>
+                                </div>
+                                <a href="#" class="btn btn-outline" style="width: 100%; text-align: center; display: block; margin-top: 1rem;" onclick="switchView('history')">View All History</a>
                             </div>
+
+                            <h3 class="text-lg mb-2 mt-4">Your Weekly Trend</h3>
+                            <div class="card weekly-trend-card">
+                                <div class="weekly-chart" id="dashboard-weekly-chart">
+                                    {% for w in weekly_trend %}
+                                    {% set h = (w.total_co2 / weekly_chart_max * 100) if weekly_chart_max > 0 else 0 %}
+                                    <div class="weekly-chart-col">
+                                        <div class="weekly-bar-wrap">
+                                            <div class="weekly-bar" data-height-pct="{{ h }}" style="height: 0%;"></div>
+                                        </div>
+                                        <p class="weekly-bar-value">{{ w.total_co2 }} kg</p>
+                                        <p class="weekly-bar-label">{{ w.week_label }}</p>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+
+                            <h3 class="text-lg mb-2 mt-4">Your badges</h3>
+                            <div class="badges-grid" id="badges-grid" aria-live="polite"></div>
                         </section>
+                    </div>
+
+                    <h3 class="text-lg mb-2 mt-4">Your Highest-Impact Items</h3>
+                    <div class="card" id="dashboard-top-offenders">
+                        {% if top_offenders %}
+                        <div class="top-offenders-list">
+                            {% for row in top_offenders %}
+                            <div class="top-offender-row">
+                                <div class="top-offender-main">
+                                    <span class="category-dot category-dot--{{ row.category|lower|replace(' ', '-') }}"></span>
+                                    <div>
+                                        <p class="text-sm font-bold">{{ row.item_name }}</p>
+                                        {% if row.brand %}<p class="text-xs text-muted">{{ row.brand }}</p>{% endif %}
+                                        <span class="category-chip category-chip--{{ row.category|lower|replace(' ', '-') }}">{{ row.category }}</span>
+                                    </div>
+                                </div>
+                                <div class="top-offender-meta">
+                                    <p class="text-sm font-bold text-high-impact">{{ row.kg_co2e }} kg</p>
+                                    {% if row.receipt_id %}
+                                    <button type="button" class="link-swap js-swap-for-receipt" data-receipt-id="{{ row.receipt_id }}">Find a swap</button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p class="text-sm text-muted">Upload receipts to see your highest-impact purchases.</p>
+                        {% endif %}
+                    </div>
+                    <div id="dashboard-offender-swap-results" class="mt-3" style="display: none;"></div>
+
+                    {% if user_swaps %}
+                    <h3 class="text-lg mb-2 mt-4" id="dashboard-swaps-heading">Your Swap Ideas</h3>
+                    <div class="card dashboard-swaps-card" id="dashboard-user-swaps">
+                        <ul class="dashboard-swaps-list">
+                            {% for sw in user_swaps[:8] %}
+                            <li class="dashboard-swap-li{% if sw.accepted %} dashboard-swap-li--accepted{% endif %}">
+                                <div class="dashboard-swap-li-main">
+                                    <span class="text-sm"><strong>{{ sw.original_product }}</strong> → {% if sw.recommended_brand %}{{ sw.recommended_brand }} {% endif %}{{ sw.recommended_product }}</span>
+                                    <span class="text-xs" style="color: var(--green-impact); font-weight: 600;">Save ~{{ sw.co2_savings }} kg</span>
+                                </div>
+                                <button type="button" class="btn btn-outline btn-sm js-accept-swap{% if sw.accepted %} is-accepted{% endif %}" data-swap-id="{{ sw.id }}" {% if sw.accepted %}disabled aria-label="Accepted"{% endif %}>
+                                    {% if sw.accepted %}<i data-lucide="check" class="swap-accept-icon"></i> Accepted{% else %}Accept Swap{% endif %}
+                                </button>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                </section>
+
+                <section id="view-leaderboard" class="view-section">
+                    <div class="leaderboard-page-header">
+                        <h1 class="text-2xl mb-1">Leaderboard</h1>
+                        <p class="text-muted mb-4">Climb the ranks with EcoPoints, CO₂ saved, and streaks.</p>
+                    </div>
+                    <div class="card leaderboard-page-card" style="padding: 0; overflow: hidden;">
+                        <div class="leaderboard-loading text-sm text-muted" id="leaderboard-loading" style="padding: 1.5rem;">Loading…</div>
+                        <div class="leaderboard-skeleton leaderboard-skeleton--wide" id="leaderboard-skeleton" hidden>
+                            <div class="skeleton-line skeleton-line--full mb-2"></div>
+                            <div class="skeleton-line skeleton-line--full mb-2"></div>
+                            <div class="skeleton-line skeleton-line--full mb-2"></div>
+                            <div class="skeleton-line skeleton-line--full"></div>
+                        </div>
+                        <div id="leaderboard-content" class="leaderboard-gamified" hidden>
+                            <div id="leaderboard-podium" class="leaderboard-podium" aria-label="Top three"></div>
+                            <div id="leaderboard-your-card" class="leaderboard-your-card" hidden></div>
+                            <div class="leaderboard-split">
+                                <div class="leaderboard-table-block">
+                                    <h3 class="leaderboard-subheading">Full rankings</h3>
+                                    <div class="leaderboard-table-scroll">
+                                        <table class="leaderboard-table leaderboard-table--gamified">
+                                            <thead>
+                                                <tr>
+                                                    <th>Rank</th>
+                                                    <th>Name</th>
+                                                    <th>Level</th>
+                                                    <th>Points</th>
+                                                    <th>CO₂ saved</th>
+                                                    <th>Streak</th>
+                                                    <th>Badges</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="leaderboard-tbody-g"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                <aside class="leaderboard-movers-aside" id="leaderboard-movers" aria-label="Weekly movers"></aside>
+                            </div>
+                            <footer class="leaderboard-community-footer" id="leaderboard-community-footer"></footer>
+                        </div>
+                        <p class="text-sm text-muted" id="leaderboard-error" style="padding: 1.5rem; display: none;"></p>
                     </div>
                 </section>
 
-                <!-- Log Activity View -->
+                <section id="view-supermarket" class="view-section">
+                    <div id="supermarket-canvas-container" style="position:relative; width:100%; height:85vh; min-height:550px; border-radius:12px; overflow:hidden; background:#f5f0e8;">
+
+                        <div style="position:absolute; top:0; left:0; right:0; z-index:5; padding:16px 20px; background:linear-gradient(to bottom, rgba(243,245,241,0.95) 0%, rgba(243,245,241,0.7) 70%, transparent 100%); pointer-events:none;">
+                            <h2 style="margin:0 0 4px 0; font-family:'Outfit',sans-serif; font-weight:700; color:#132a13; pointer-events:auto;">Supermarket 3D</h2>
+                            <p style="margin:0; color:#4a5c4a; font-size:0.9em;">Explore the store layout and plan a lower-carbon shopping route.</p>
+                        </div>
+
+                        <div id="sm-controls" style="position:absolute; top:80px; left:16px; z-index:10; background:rgba(255,255,255,0.92); backdrop-filter:blur(8px); border-radius:12px; padding:16px; box-shadow:0 2px 12px rgba(0,0,0,0.08); width:200px; max-height:calc(85vh - 120px); overflow-y:auto;">
+                            <strong style="font-size:0.95em;">View</strong>
+                            <label style="display:flex; align-items:center; gap:8px; margin:8px 0; font-size:0.9em; cursor:pointer;">
+                                <input type="checkbox" id="sm-show-route" checked> Show route
+                            </label>
+                            <label style="display:flex; align-items:center; gap:8px; margin:4px 0; font-size:0.9em; cursor:pointer;">
+                                <input type="checkbox" id="sm-eco-picks" checked> Eco picks glow
+                            </label>
+                            <label style="display:flex; align-items:center; gap:8px; margin:4px 0; font-size:0.9em; cursor:pointer;">
+                                <input type="checkbox" id="sm-show-labels" checked> Show labels
+                            </label>
+                            <hr style="border:none; border-top:1px solid #e5e7eb; margin:12px 0;">
+                            <strong style="font-size:0.95em;">Categories</strong>
+                            <div id="sm-category-filters" style="margin-top:8px;"></div>
+                            <hr style="border:none; border-top:1px solid #e5e7eb; margin:12px 0;">
+                            <div id="sm-route-info">
+                                <strong style="font-size:0.95em;">Route</strong>
+                                <p style="color:#9ca3af; font-size:0.85em; margin:4px 0;">Generate a route to see stops.</p>
+                                <div id="sm-route-stops"></div>
+                            </div>
+                            <button type="button" onclick="window.resetSupermarketView && window.resetSupermarketView()" style="margin-top:12px; padding:6px 16px; border:1px solid #d3e0d4; border-radius:8px; background:white; cursor:pointer; font-size:0.85em; font-family:'Outfit',sans-serif;">Reset view</button>
+                        </div>
+
+                        <div style="position:absolute; top:80px; right:16px; z-index:10; background:rgba(255,255,255,0.92); backdrop-filter:blur(8px); border-radius:12px; padding:16px; box-shadow:0 2px 12px rgba(0,0,0,0.08); width:220px;">
+                            <strong style="font-size:0.95em;">Find my items</strong>
+                            <select id="sm-item-source" style="width:100%; margin:10px 0; padding:8px; border:1px solid #d3e0d4; border-radius:8px; font-family:'Outfit',sans-serif; font-size:0.9em;">
+                                <option value="latest">From latest receipt</option>
+                                <option value="custom">Custom list</option>
+                            </select>
+                            <div id="sm-item-checklist" style="max-height:200px; overflow-y:auto; margin-bottom:10px;"></div>
+                            <button type="button" id="sm-generate-route" style="width:100%; padding:10px; background:#4f772d; color:white; border:none; border-radius:8px; cursor:pointer; font-family:'Outfit',sans-serif; font-weight:600;">Generate route</button>
+                        </div>
+
+                        <div id="sm-product-popup" style="display:none; position:absolute; z-index:20; background:rgba(255,255,255,0.95); backdrop-filter:blur(8px); border-radius:12px; padding:16px; box-shadow:0 4px 20px rgba(0,0,0,0.15); width:260px; pointer-events:auto;"></div>
+                    </div>
+                </section>
+
+                <!-- Upload Receipt view -->
                 <section id="view-log" class="view-section">
                     <h1 class="text-2xl mb-2">Automated Carbon Logging</h1>
                     <p class="text-muted mb-2">Upload your receipt and let our AI handle the rest.</p>
@@ -184,6 +422,7 @@
                         </div>
                     </div>
 
+                    {# Parsed receipt UI (items, brands, swap recommendations) is rendered into #ai-feedback by static/app.js #}
                     <div id="ai-feedback" class="mt-4" style="display: none; max-width: 600px; margin: 1rem auto;">
                         <div class="processing-container pulse">
                             <div style="display: flex; gap: 1rem; align-items: center;">
@@ -194,139 +433,114 @@
                     </div>
                 </section>
 
-                </section>
-
-                <!-- Coach View -->
-                <section id="view-insights" class="view-section">
-                    <h1 class="text-2xl mb-2">AI Coach Hub</h1>
-                    <p class="text-muted mb-2">Deep dive into your behavioral patterns and carbon footprint.</p>
-                    
-                    <div class="grid-cols-2 mt-2">
-                        {% if insights %}
-                            {% for insight in insights %}
-                            <div class="card mt-2">
-                                <h3 class="text-lg mb-2">{{ insight.title }}</h3>
-                                <p class="text-sm text-muted">{{ insight.text }}</p>
-                                <div class="mt-4" style="display: flex; gap: 0.5rem;">
-                                    <span style="background: #f1f5f9; padding: 4px 8px; border-radius: 4px; font-size: 10px;">{{ insight.saving }}</span>
-                                    <span style="background: #f1f5f9; padding: 4px 8px; border-radius: 4px; font-size: 10px;">{{ insight.difficulty }}</span>
-                                </div>
-                            </div>
-                            {% endfor %}
-                        {% else %}
-                            <p class="text-sm text-muted">More insights will appear as you log activities.</p>
-                        {% endif %}
-                    </div>
-                </section>
-                
-                <!-- Full History View -->
+                <!-- Full History View (list + detail loaded via /api/history) -->
                 <section id="view-history" class="view-section">
                     <h1 class="text-2xl mb-2">Purchase History</h1>
                     <p class="text-muted mb-4">Detailed breakdown of all your logged receipts and items.</p>
-                    
-                    <div style="display: flex; flex-direction: column; gap: 1.5rem;" id="history-container">
-                        {% set grouped_activities = all_activities | groupby('receipt_id') %}
-                        {% for receipt_group in grouped_activities %}
-                            <div class="card" style="padding: 0; overflow: hidden;">
-                                <div style="background: var(--bg-main); padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
-                                    <div>
-                                        <p class="text-xs font-bold uppercase tracking-wider text-muted">Receipt Entry</p>
-                                        <h3 class="text-lg" style="margin: 0;">{{ receipt_group.grouper or 'Manual Entry' }}</h3>
-                                    </div>
-                                    <div style="text-align: right;">
-                                        <p class="text-xs text-muted">Date Logged</p>
-                                        <p class="text-sm font-bold">{{ receipt_group.list[0].timestamp.strftime('%B %d, %Y') }}</p>
-                                    </div>
-                                </div>
-                                <div style="padding: 1rem 1.5rem;">
-                                    <table style="width: 100%; border-collapse: collapse;">
-                                        <thead>
-                                            <tr style="border-bottom: 1px solid var(--border);">
-                                                <th style="text-align: left; padding: 0.75rem 0; font-size: 0.75rem; text-transform: uppercase;" class="text-muted">Item Description</th>
-                                                <th style="text-align: left; padding: 0.75rem 0; font-size: 0.75rem; text-transform: uppercase;" class="text-muted">Category</th>
-                                                <th style="text-align: right; padding: 0.75rem 0; font-size: 0.75rem; text-transform: uppercase;" class="text-muted">Footprint</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {% for item in receipt_group.list %}
-                                            <tr style="border-bottom: 1px solid #f8fafc;">
-                                                <td style="padding: 0.875rem 0;">
-                                                    <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                                        <i data-lucide="shopping-tag" size="14"></i>
-                                                        <span class="text-sm font-bold">{{ item.item_name }}</span>
-                                                    </div>
-                                                </td>
-                                                <td style="padding: 0.875rem 0;"><span class="text-xs" style="background: var(--bg-main); padding: 2px 8px; border-radius: 4px;">{{ item.category or 'General' }}</span></td>
-                                                <td style="padding: 0.875rem 0; text-align: right;">
-                                                    <span class="text-sm font-bold {% if item.kg_co2e > 5 %}text-high-impact{% elif item.kg_co2e < 1.5 %}text-low-impact{% endif %}">
-                                                        {{ item.kg_co2e|round(2) }}kg
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                            {% endfor %}
-                                        </tbody>
-                                        <tfoot>
-                                            <tr>
-                                                <td colspan="2" style="padding-top: 1rem; text-align: right; font-size: 0.875rem;" class="text-muted">Receipt Total:</td>
-                                                <td style="padding-top: 1rem; text-align: right; font-size: 0.875rem; font-weight: 700;">
-                                                    {% set total = receipt_group.list|sum(attribute='kg_co2e') %}
-                                                    {{ total|round(2) }}kg CO2e
-                                                </td>
-                                            </tr>
-                                        </tfoot>
-                                    </table>
-                                </div>
-                            </div>
-                        {% else %}
-                            <div class="card" style="text-align: center; padding: 4rem 2rem;">
-                                <i data-lucide="archive" size="48" class="text-muted" style="margin-bottom: 1rem;"></i>
-                                <h3 class="text-xl">No History Found</h3>
-                                <p class="text-muted mt-2">Upload your first receipt to see it here!</p>
-                            </div>
-                        {% endfor %}
+
+                    <div class="history-toolbar card" style="padding: 1rem 1.25rem; margin-bottom: 1.25rem;">
+                        <div class="history-toolbar-row">
+                            <input type="search" id="history-search" class="history-search-input" placeholder="Search by item or receipt…" autocomplete="off" aria-label="Filter history" />
+                            <select id="history-filter-category" class="history-filter-select" aria-label="Filter by category">
+                                <option value="">All categories</option>
+                                <option value="Meat">Meat</option>
+                                <option value="Dairy">Dairy</option>
+                                <option value="Produce">Produce</option>
+                                <option value="Beverages">Beverages</option>
+                                <option value="Grains">Grains</option>
+                                <option value="Snacks">Snacks</option>
+                                <option value="Frozen">Frozen</option>
+                                <option value="Household">Household</option>
+                                <option value="Other">Other</option>
+                                <option value="General">General</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="history-page" id="history-container">
+                        <div id="history-cards-list" class="history-cards-list" role="list"></div>
+                        <div class="history-load-more-wrap">
+                            <button type="button" id="history-load-more" class="btn btn-primary history-load-more-btn" hidden>Load more</button>
+                            <p id="history-loading-hint" class="text-xs text-muted history-loading-hint" hidden>Loading…</p>
+                        </div>
                     </div>
                 </section>
             </div>
+
+            <button type="button" id="chat-fab" class="chat-fab" aria-label="Open EcoCart AI chat" hidden>
+                <i data-lucide="message-circle"></i>
+            </button>
+
+            <nav class="mobile-tab-bar" id="mobile-tab-bar" aria-label="Main navigation">
+                <button type="button" class="mobile-tab-btn active" data-view="dashboard" aria-label="Dashboard">
+                    <i data-lucide="layout-dashboard"></i>
+                </button>
+                <button type="button" class="mobile-tab-btn" data-view="log" aria-label="Upload">
+                    <i data-lucide="camera"></i>
+                </button>
+                <button type="button" class="mobile-tab-btn" data-view="history" aria-label="History">
+                    <i data-lucide="history"></i>
+                </button>
+                <button type="button" class="mobile-tab-btn" data-view="supermarket" aria-label="3D Supermarket">
+                    <i data-lucide="map-pin"></i>
+                </button>
+                <button type="button" class="mobile-tab-btn" data-view="leaderboard" aria-label="Leaderboard">
+                    <i data-lucide="trophy"></i>
+                </button>
+            </nav>
         </main>
 
-        <!-- AI Coach Sidebar (Right) -->
-        <aside class="right-sidebar">
-            <div style="padding: 1.5rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--bg-main);">
-                <div>
-                    <h3 class="text-sm font-bold" style="margin: 0;">AI Coach</h3>
-                    <p class="text-xs text-muted" style="margin: 0;">Always active</p>
-                </div>
-                <div style="width: 8px; height: 8px; background: var(--primary-dark); border-radius: 50%;"></div>
-            </div>
+        <div id="chat-modal-backdrop" class="chat-modal-backdrop" aria-hidden="true" hidden></div>
 
-            <div class="chat-container" id="chat-scroller">
-                <div class="chat-message message-ai">
-                    Hello! I'm your sustainability coach. Ask me anything about reducing your carbon footprint!
+        <!-- EcoCart AI chat (sidebar on wide screens, overlay on small) -->
+        <aside id="right-chat-sidebar" class="right-sidebar">
+            <div class="right-sidebar-inner">
+                <div class="chat-sidebar-header">
+                    <div>
+                        <h3 class="text-sm font-bold chat-sidebar-title">EcoCart AI</h3>
+                        <p class="text-xs text-muted" style="margin: 0;">Sustainability assistant</p>
+                    </div>
+                    <div class="chat-header-actions">
+                        <button type="button" id="chat-collapse-btn" class="chat-icon-btn" aria-label="Collapse chat panel" title="Collapse">
+                            <i data-lucide="chevron-left"></i>
+                        </button>
+                        <button type="button" id="chat-mobile-close-btn" class="chat-icon-btn chat-mobile-only" aria-label="Close chat" title="Close">
+                            <i data-lucide="x"></i>
+                        </button>
+                    </div>
                 </div>
-                
-                <div class="chat-message message-ai" style="background: rgba(79, 119, 45, 0.05); border: 1px dashed var(--fern);">
-                    <p class="text-xs font-bold" style="margin-bottom: 4px;">Suggestions:</p>
-                    <ul style="list-style: none; padding: 0; font-size: 0.75rem; color: var(--text-muted);">
-                        <li style="margin-bottom: 4px;">• "How can I reduce food waste?"</li>
-                        <li style="margin-bottom: 4px;">• "What's the best milk alternative?"</li>
-                        <li>• "Is aluminum more green than plastic?"</li>
-                    </ul>
-                </div>
-            </div>
 
-            <div class="chat-input-area">
-                <div class="chat-input-wrapper">
-                    <input type="text" class="chat-input" placeholder="Type your question..." disabled>
-                    <button class="btn btn-primary btn-sm" style="padding: 6px;" disabled>
-                        <i data-lucide="send" size="14"></i>
-                    </button>
+                <div class="chat-container" id="chat-scroller">
+                    <div id="chat-messages"></div>
+                    <div class="chat-message message-ai chat-suggestions-block" id="chat-suggestions-block">
+                        <p class="text-xs font-bold" style="margin-bottom: 8px;">Try asking:</p>
+                        <div class="chat-suggestion-chips">
+                            <button type="button" class="chat-suggestion-chip" data-prompt="What's my biggest carbon impact?">What's my biggest carbon impact?</button>
+                            <button type="button" class="chat-suggestion-chip" data-prompt="Suggest swaps for my last receipt">Suggest swaps for my last receipt</button>
+                            <button type="button" class="chat-suggestion-chip" data-prompt="How does beef compare to chicken?">How does beef compare to chicken?</button>
+                            <button type="button" class="chat-suggestion-chip" data-prompt="Tips for a greener grocery list">Tips for a greener grocery list</button>
+                        </div>
+                    </div>
                 </div>
-                <p class="text-xs text-muted mt-4" style="text-align: center;">Coach functionality coming soon</p>
+
+                <div class="chat-input-area">
+                    <div class="chat-input-wrapper">
+                        <input type="text" id="chat-input-field" class="chat-input" placeholder="Ask about your groceries..." disabled autocomplete="off">
+                        <button type="button" id="chat-send-btn" class="btn btn-primary btn-sm" style="padding: 6px;" disabled>
+                            <i data-lucide="send" size="14"></i>
+                        </button>
+                    </div>
+                    <p class="text-xs text-muted mt-4 chat-soon-hint" style="text-align: center;">Coach functionality coming soon</p>
+                </div>
             </div>
         </aside>
     </div>
 
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-relevant="additions"></div>
+
+    <script type="application/json" id="dashboard-initial">{{ dashboard_stats|tojson }}</script>
     <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <script type="module" src="{{ url_for('static', filename='supermarket3d.js') }}"></script>
     <script>
         lucide.createIcons();
     </script>

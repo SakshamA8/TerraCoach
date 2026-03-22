@@ -1,3 +1,5 @@
+# WARNING: Development only. Do not deploy without authentication.
+
 from app import app, db, User, Activity
 from flask import session
 import os
@@ -24,4 +26,4 @@ def debug_login():
     return "Logged in as Debug Explorer! Go to <a href='/'>Dashboard</a>"
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=1970)

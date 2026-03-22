@@ -1,4 +1,4 @@
-# Base image
+# EcoCart AI — production image
 FROM python:3.12-slim
 
 # Set environment variables
@@ -16,7 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install gunicorn
 
 # Create necessary directories
 RUN mkdir -p /app/data /app/uploads
@@ -24,5 +23,7 @@ RUN mkdir -p /app/data /app/uploads
 # Copy project
 COPY . .
 
+EXPOSE 1970
+
 # Run application
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:1970", "app:app"]

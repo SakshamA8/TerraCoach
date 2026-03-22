@@ -1,0 +1,175 @@
+/* 3D Supermarket view overlays */
+#view-supermarket.view-section.active {
+    display: flex;
+    flex-direction: column;
+    min-height: max(480px, calc(100vh - 5rem));
+}
+
+.view-supermarket-wrap {
+    position: relative;
+    width: 100%;
+    flex: 1 1 0;
+    min-height: 480px;
+    min-width: 0;
+}
+
+.supermarket-canvas-host {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+}
+
+.supermarket-canvas-host canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.supermarket-overlay-panel {
+    position: absolute;
+    z-index: 10;
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(8px);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 8px 30px rgba(19, 42, 19, 0.12);
+    max-width: min(320px, 92vw);
+    font-size: 0.875rem;
+}
+
+.supermarket-controls {
+    top: 12px;
+    left: 12px;
+}
+
+.supermarket-route-panel {
+    top: 12px;
+    right: 12px;
+    max-width: min(300px, 94vw);
+}
+
+.supermarket-route-sidebar {
+    top: 80px;
+    left: 12px;
+    max-height: 60vh;
+    overflow-y: auto;
+    max-width: min(260px, 90vw);
+}
+
+.supermarket-controls h4,
+.supermarket-route-panel h4,
+.supermarket-route-sidebar h4 {
+    margin: 0 0 10px;
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.supermarket-controls label,
+.supermarket-route-panel label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.supermarket-controls .btn-row,
+.supermarket-route-panel .btn-row {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.supermarket-product-tooltip {
+    position: fixed;
+    z-index: 20;
+    pointer-events: none;
+    background: rgba(19, 42, 19, 0.92);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    max-width: 220px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+    display: none;
+}
+
+.supermarket-product-tooltip .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.supermarket-popup-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(0, 0, 0, 0.35);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+
+.supermarket-popup-backdrop.is-open {
+    display: flex;
+}
+
+.supermarket-popup-card {
+    background: #fff;
+    border-radius: 16px;
+    padding: 1.25rem;
+    max-width: 400px;
+    width: 100%;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+}
+
+.supermarket-landscape-banner {
+    display: none;
+    background: #fef3c7;
+    color: #92400e;
+    padding: 8px 12px;
+    text-align: center;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.supermarket-svg-fallback {
+    display: none;
+    width: 100%;
+    height: auto;
+    max-height: 70vh;
+}
+
+@media (max-width: 768px) {
+    .supermarket-landscape-banner {
+        display: block;
+    }
+    .view-supermarket-wrap.is-mobile-fallback .supermarket-canvas-host,
+    .view-supermarket-wrap.is-mobile-fallback .supermarket-controls,
+    .view-supermarket-wrap.is-mobile-fallback .supermarket-route-panel,
+    .view-supermarket-wrap.is-mobile-fallback .supermarket-route-sidebar {
+        display: none !important;
+    }
+    .view-supermarket-wrap.is-mobile-fallback .supermarket-svg-fallback {
+        display: block;
+    }
+}
+
+.supermarket-stop-item {
+    padding: 8px;
+    margin: 4px 0;
+    border-radius: 8px;
+    cursor: pointer;
+    border: 1px solid var(--border, #d3e0d4);
+    font-size: 0.78rem;
+}
+
+.supermarket-stop-item:hover {
+    background: rgba(79, 119, 45, 0.08);
+}
